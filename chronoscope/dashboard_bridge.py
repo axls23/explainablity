@@ -106,6 +106,8 @@ class DashboardBridge:
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._thread: Optional[threading.Thread] = None
         self._last_frame: dict[str, Any] = {}
+        self._stop_event: Optional[asyncio.Event] = None
+        self._ws_server = None
 
         self._http_server = None
         self._http_thread: Optional[threading.Thread] = None
@@ -116,8 +118,15 @@ class DashboardBridge:
         return self
 
     def stop(self):
-        if self._loop:
-            self._loop.call_soon_threadsafe(self._loop.stop)
+        """Gracefully shutdown WebSocket server and event loop."""
+        if self._loop and self._stop_event:
+            try:
+                self._loop.call_soon_threadsafe(self._stop_event.set)
+            except RuntimeError:
+                pass  # event loop already closed
+            # Wait briefly for graceful shutdown
+            time.sleep(0.2)
+        
         if self._http_server:
             try:
                 self._http_server.shutdown()
@@ -158,14 +167,16 @@ class DashboardBridge:
         if preferred_layer:
             metric_series = interceptor.get_head_metric_series(preferred_layer)
             if entropy_row is None and metric_series is not None and getattr(metric_series, "numel", lambda: 0)() > 0:
-                entropy_row = metric_series[-1]
+                _n = metric_series.shape[0]
+                entropy_row = metric_series[min(int(token_idx), _n - 1)]
         if entropy_row is None:
             summary = interceptor.debug_head_metric_summary()
             if summary:
                 fallback_layer = sorted(summary.keys())[-1]
                 metric_series = interceptor.get_head_metric_series(fallback_layer)
                 if entropy_row is None and metric_series is not None and getattr(metric_series, "numel", lambda: 0)() > 0:
-                    entropy_row = metric_series[-1]
+                    _n = metric_series.shape[0]
+                    entropy_row = metric_series[min(int(token_idx), _n - 1)]
 
         if entropy_row is not None and hasattr(entropy_row, "ndim") and entropy_row.ndim > 1:
             # Vector mode [H, F] -> default to first feature (Shannon-like stream)
@@ -202,23 +213,63 @@ class DashboardBridge:
         """Push VAR/FDR influence frame to dashboard.
         
         Accepts either:
-        - analyzer instance + config (standard path from analyzer.head_interaction_analysis)
-        - pre-built dict from Exp6 (Exp6 aggregates across layers before pushing)
+        - dict from head_interaction_analysis (has 'layer_name' or 'fdr_result' key)
+        - pre-built dict from Exp6 (has 'fdr_reject_matrix' or 'masked_influence' key)
         """
         if isinstance(analyzer_or_dict, dict):
-            # Exp6 pre-built dict path
-            frame = self._build_var_frame_from_dict(analyzer_or_dict)
+            # Route by dict shape: head_interaction_analysis output vs Exp6 pre-built
+            d = analyzer_or_dict
+            if "layer_name" in d or "fdr_result" in d or "stationarity" in d:
+                # Standard head_interaction_analysis output
+                frame = self._build_var_frame_from_analyzer(d)
+            else:
+                # Exp6 pre-aggregated dict
+                frame = self._build_var_frame_from_dict(d)
         else:
-            # Standard analyzer instance path
-            head_result = analyzer_or_dict
-            frame = self._build_var_frame_from_analyzer(head_result)
+            # Legacy: non-dict path (shouldn't normally occur)
+            frame = self._build_var_frame_from_analyzer(analyzer_or_dict)
         self._send(frame)
 
     def _build_var_frame_from_analyzer(self, head_result: dict):
         """Extract VAR frame from analyzer result dict (standard path)."""
         stationarity = head_result.get("joint_stationarity", {})
         per_head = stationarity.get("per_head") if isinstance(stationarity, dict) else None
+        # Rename 'head' key to 'h' so renderStationarity() can access s.h
+        if per_head:
+            per_head = [
+                dict(s, h=s.get("head", s.get("h", i)))
+                for i, s in enumerate(per_head)
+            ]
 
+        fdr_result = head_result.get("fdr_result") or {}
+        influence_matrix = head_result.get("influence_matrix")
+        fdr_reject = fdr_result.get("reject_matrix")
+
+        # Fallback: if Granger/FDR block failed, synthesise an all-False mask so
+        # the influence matrix still renders (just without highlighted pairs).
+        if fdr_reject is None and influence_matrix is not None:
+            try:
+                H = np.asarray(influence_matrix).shape[0]
+                fdr_reject = np.zeros((H, H), dtype=bool)
+            except Exception:
+                pass
+
+        # PDC: reduce [H, H] matrices to per-head [H] vectors (sum of incoming)
+        pdc_data = head_result.get("pdc") if isinstance(head_result.get("pdc"), dict) else None
+        pdc_low = pdc_high = None
+        if pdc_data is not None:
+            try:
+                pdc_low_mat = np.asarray(pdc_data.get("pdc_low"))  # [H, H]
+                pdc_low = pdc_low_mat.sum(axis=1).tolist()          # [H]
+            except Exception:
+                pdc_low = None
+            try:
+                pdc_high_mat = np.asarray(pdc_data.get("pdc_high"))  # [H, H]
+                pdc_high = pdc_high_mat.sum(axis=1).tolist()           # [H]
+            except Exception:
+                pdc_high = None
+
+        sig_pairs_raw = fdr_result.get("significant_pairs") or head_result.get("significant_pairs")
         frame = {
             "stat_per_head": per_head,
             "coint_rank": int(head_result.get("cointegration", {}).get("n_coint_vectors", 0))
@@ -226,16 +277,16 @@ class DashboardBridge:
             else 0,
             "vecm_used": head_result.get("model_type") == "VECM",
             "selected_lag": head_result.get("selected_lag"),
-            "influence_matrix": head_result.get("influence_matrix"),
-            "fdr_reject": (head_result.get("fdr_result") or {}).get("reject_matrix"),
-            "pval_matrix": (head_result.get("fdr_result") or {}).get("pval_corrected"),
-            "sig_pairs": (head_result.get("fdr_result") or {}).get("n_significant"),
+            "influence_matrix": influence_matrix,
+            "fdr_reject": fdr_reject,
+            "pval_matrix": fdr_result.get("pval_corrected"),
+            "sig_pairs": fdr_result.get("n_significant", 0),
             "significant_pairs": self._convert_pairs(
-                head_result.get("significant_pairs"),
-                head_result.get("influence_matrix"),
+                sig_pairs_raw,
+                influence_matrix,
             ),
-            "pdc_low": ((head_result.get("pdc") or {}).get("pdc_low") if isinstance(head_result.get("pdc"), dict) else None),
-            "pdc_high": ((head_result.get("pdc") or {}).get("pdc_high") if isinstance(head_result.get("pdc"), dict) else None),
+            "pdc_low": pdc_low,
+            "pdc_high": pdc_high,
         }
         return frame
 
@@ -399,22 +450,34 @@ class DashboardBridge:
         if key:
             metrics = interceptor._head_metrics.get(key, [])
         if not metrics and interceptor._head_metrics:
-            metrics = interceptor._head_metrics.get(sorted(interceptor._head_metrics.keys())[-1], [])
+            # Sort numerically by the layer index embedded in the key
+            def _layer_idx_of(k):
+                parts = k.split(".")
+                for p in reversed(parts):
+                    if p.isdigit():
+                        return int(p)
+                return -1
+            best_key = max(interceptor._head_metrics.keys(), key=_layer_idx_of)
+            metrics = interceptor._head_metrics.get(best_key, [])
 
         if not metrics:
             return
 
         last = metrics[-1]
+        n_heads = int(getattr(config, "n_heads", 12))
+        feat_mode = getattr(config, "head_feature_mode", "scalar")
         # Handle both scalars and vector feature modes
+        # scalar mode stores [1, H] per step; vector mode stores [H, F]
         if hasattr(last, "shape"):
             if last.ndim == 2:
-                H = min(int(getattr(config, "n_heads", last.shape[0])), last.shape[0])
+                if feat_mode == "vector":
+                    H = min(n_heads, last.shape[0])   # [H, F] → first dim is H
+                else:
+                    H = min(n_heads, last.shape[-1])  # [1, H] → last dim is H
             else:
-                H = min(int(getattr(config, "n_heads", len(last))), len(last))
+                H = min(n_heads, len(last))
         else:
-            H = int(getattr(config, "n_heads", 1))
-        
-        feat_mode = getattr(config, "head_feature_mode", "scalar")
+            H = n_heads
 
         sq_data = []
         for h in range(H):
@@ -434,11 +497,16 @@ class DashboardBridge:
                             }
                         )
                 else:
-                    # Scalar mode — access single value per head
-                    if hasattr(last, "__getitem__") and h < (last.shape[0] if hasattr(last, "shape") else len(last)):
-                        val = _safe_float(last[h])
-                    else:
-                        val = None
+                    # Scalar mode — last is [1, H] (batch × heads)
+                    val = None
+                    if hasattr(last, "__getitem__"):
+                        try:
+                            if hasattr(last, "ndim") and last.ndim == 2:
+                                val = _safe_float(last[0, h])  # [1, H] → row 0, col h
+                            else:
+                                val = _safe_float(last[h])     # flat [H]
+                        except (IndexError, TypeError):
+                            val = None
                     sq_data.append(
                         {
                             "h": h,
@@ -559,13 +627,30 @@ class DashboardBridge:
                 self._ws_clients.discard(ws)
 
         async def _server():
-            async with websockets.serve(_handler, self.ws_host, self.ws_port):
-                await asyncio.Future()
+            async with websockets.serve(_handler, self.ws_host, self.ws_port) as server:
+                self._ws_server = server
+                # Wait for stop event instead of infinite Future
+                await self._stop_event.wait()
+                # Close server gracefully
+                server.close()
+                await server.wait_closed()
 
         def _run():
             self._loop = asyncio.new_event_loop()
             asyncio.set_event_loop(self._loop)
-            self._loop.run_until_complete(_server())
+            self._stop_event = asyncio.Event()
+            try:
+                self._loop.run_until_complete(_server())
+            except Exception:
+                pass
+            finally:
+                # Cancel remaining tasks
+                pending = asyncio.all_tasks(self._loop)
+                for task in pending:
+                    task.cancel()
+                # Give tasks a chance to complete cancellation
+                self._loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+                self._loop.close()
 
         self._thread = threading.Thread(target=_run, daemon=True, name="chronoscope-ws")
         self._thread.start()

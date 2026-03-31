@@ -24,7 +24,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import torch
 from rich.console import Console
 from chronoscope.config import ChronoscopeConfig
-from chronoscope.models import load_model, list_hookable_layers
+from chronoscope.models import load_model, list_hookable_layers, detect_num_attention_heads, detect_hidden_dim
 from chronoscope.interceptor import ChronoscopeInterceptor
 from chronoscope.observer import SignalObserver
 from chronoscope.analyzer import CausalAnalyzer
@@ -62,6 +62,18 @@ def run(
     else:
         console.print("\n[bold]Step 1:[/] Loading model...")
         model, tokenizer = load_model(config)
+        
+        # Auto-detect model architecture parameters
+        detected_heads = detect_num_attention_heads(model)
+        detected_dim = detect_hidden_dim(model)
+        
+        if detected_heads and detected_heads > 0:
+            console.print(f"  [cyan]AUTO-DETECTED:[/] {detected_heads} attention heads (configured: {config.n_heads})")
+            config.n_heads = detected_heads
+        
+        if detected_dim and detected_dim > 0:
+            console.print(f"  [cyan]AUTO-DETECTED:[/] {detected_dim} hidden dimension (configured: {config.hidden_dim})")
+            config.hidden_dim = detected_dim
 
     # Show available layers for hooking
     console.print("\n[bold]Hookable layers:[/]")

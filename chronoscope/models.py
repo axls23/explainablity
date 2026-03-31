@@ -15,6 +15,88 @@ from .config import ChronoscopeConfig
 console = Console()
 
 
+def detect_num_attention_heads(model) -> int | None:
+    """
+    Best-effort detection of the model attention head count.
+
+    Tries known config fields first, then falls back to module attributes.
+    """
+    cfg = getattr(model, "config", None)
+    if cfg is None and hasattr(model, "model"):
+        cfg = getattr(model.model, "config", None)
+
+    # Common transformer config keys across model families.
+    config_keys = ["num_attention_heads", "n_head", "num_heads", "n_heads"]
+
+    if cfg is not None:
+        for key in config_keys:
+            val = getattr(cfg, key, None)
+            if isinstance(val, int) and val > 0:
+                return val
+
+        # Some architectures keep this inside nested text_config.
+        text_cfg = getattr(cfg, "text_config", None)
+        if text_cfg is not None:
+            for key in config_keys:
+                val = getattr(text_cfg, key, None)
+                if isinstance(val, int) and val > 0:
+                    return val
+
+    # Fallback: inspect attention modules for a num_heads-like field.
+    target = model.model if hasattr(model, "model") else model
+    for _, module in target.named_modules():
+        for key in ["num_heads", "num_attention_heads", "n_head", "n_heads"]:
+            val = getattr(module, key, None)
+            if isinstance(val, int) and val > 0:
+                return val
+
+    return None
+
+
+def detect_hidden_dim(model) -> int | None:
+    """
+    Best-effort detection of the model hidden dimension.
+
+    Tries known config fields first, then falls back to checking
+    the first layer's hidden dimension.
+    """
+    cfg = getattr(model, "config", None)
+    if cfg is None and hasattr(model, "model"):
+        cfg = getattr(model.model, "config", None)
+
+    # Common transformer config keys for hidden size
+    config_keys = ["hidden_size", "d_model", "hidden_dim", "dim"]
+
+    if cfg is not None:
+        for key in config_keys:
+            val = getattr(cfg, key, None)
+            if isinstance(val, int) and val > 0:
+                return val
+
+        # Some architectures keep this inside nested text_config
+        text_cfg = getattr(cfg, "text_config", None)
+        if text_cfg is not None:
+            for key in config_keys:
+                val = getattr(text_cfg, key, None)
+                if isinstance(val, int) and val > 0:
+                    return val
+
+    # Fallback: inspect first linear layer to infer hidden dimension
+    target = model.model if hasattr(model, "model") else model
+    try:
+        for _, module in target.named_modules():
+            if hasattr(module, "out_features"):
+                # Found a linear layer; assume this is close to hidden_dim
+                val = getattr(module, "out_features", None)
+                if isinstance(val, int) and val > 0 and val >= 256:
+                    # Heuristic: real hidden dims are typically >= 256
+                    return val
+    except Exception:
+        pass
+
+    return None
+
+
 def load_model(config: ChronoscopeConfig):
     """
     Load a HuggingFace causal LM and tokenizer.
@@ -121,11 +203,31 @@ def load_model(config: ChronoscopeConfig):
         if hasattr(model, "config"):
             model.config.output_attentions = True
             model.config.return_dict = True
+
+        detected_heads = detect_num_attention_heads(model)
+        if detected_heads is not None:
+            prev = getattr(config, "n_heads", None)
+            config.n_heads = detected_heads
+            if prev != detected_heads:
+                console.print(
+                    f"[green]Auto-detected attention heads:[/] {detected_heads} "
+                    f"(was {prev})"
+                )
+
         console.print(
             f"[bold green]Model loaded.[/] "
             f"Parameters: {sum(p.numel() for p in model.parameters()):,}"
         )
     else:
+        detected_heads = detect_num_attention_heads(model)
+        if detected_heads is not None:
+            prev = getattr(config, "n_heads", None)
+            config.n_heads = detected_heads
+            if prev != detected_heads:
+                console.print(
+                    f"[green]Auto-detected attention heads:[/] {detected_heads} "
+                    f"(was {prev})"
+                )
         console.print(f"[bold green]Model loaded via AirLLM.[/]")
 
     return model, tokenizer

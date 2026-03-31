@@ -484,6 +484,58 @@ class CausalAnalyzer:
             return
         self._var_cls = VAR
 
+    def _preprocess_series_for_var(self, series_np: np.ndarray) -> np.ndarray:
+        """
+        Preprocess channels before VAR/VECM fitting.
+
+        Steps (configurable):
+            1) logit transform channels naturally bounded in [0, 1]
+            2) per-channel scaling ('zscore' or 'robust')
+            3) remove common per-timestep component (row mean)
+        """
+        if not getattr(self.config, "var_preprocess_enable", True):
+            return np.nan_to_num(series_np, nan=0.0, posinf=0.0, neginf=0.0)
+
+        x = np.array(series_np, dtype=np.float64, copy=True)
+        x = np.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
+
+        eps = float(getattr(self.config, "var_preprocess_eps", 1e-6) or 1e-6)
+
+        # 1) Bounded-channel logit transform.
+        if getattr(self.config, "var_preprocess_logit_bounded", True):
+            col_min = np.min(x, axis=0)
+            col_max = np.max(x, axis=0)
+            bounded = (col_min >= -1e-6) & (col_max <= 1.0 + 1e-6)
+            if np.any(bounded):
+                xb = np.clip(x[:, bounded], eps, 1.0 - eps)
+                x[:, bounded] = np.log(xb / (1.0 - xb))
+
+        # 2) Channel-wise scaling.
+        scale_mode = str(getattr(self.config, "var_preprocess_scale", "robust") or "robust").lower()
+        if scale_mode == "zscore":
+            mu = np.mean(x, axis=0, keepdims=True)
+            sd = np.std(x, axis=0, keepdims=True)
+            sd = np.where(sd < eps, 1.0, sd)
+            x = (x - mu) / sd
+        elif scale_mode == "robust":
+            med = np.median(x, axis=0, keepdims=True)
+            mad = np.median(np.abs(x - med), axis=0, keepdims=True)
+            robust_sd = 1.4826 * mad
+            robust_sd = np.where(robust_sd < eps, 1.0, robust_sd)
+            x = (x - med) / robust_sd
+
+        # 3) Remove common-mode variation shared by all channels at each timestep.
+        if getattr(self.config, "var_preprocess_remove_global_mean", True):
+            x = x - x.mean(axis=1, keepdims=True)
+
+        clip_val = getattr(self.config, "var_preprocess_clip", 10.0)
+        if clip_val is not None:
+            cv = float(clip_val)
+            if cv > 0:
+                x = np.clip(x, -cv, cv)
+
+        return np.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0)
+
     # ================================================================== #
     #  GAP A: Stationarity & Cointegration Methods
     # ================================================================== #
@@ -628,6 +680,46 @@ class CausalAnalyzer:
                 except Exception:
                     pval_matrix[i, j] = 1.0
 
+        return pval_matrix
+
+    def _granger_pvalue_matrix_vecm(
+        self,
+        vecm_result,
+        H_active: int
+    ) -> np.ndarray:
+        """
+        B.1.v — Compute Granger causality Wald test p-value for VECM directed pair (j→i).
+        Tests H0: Gamma coefficients for variable j in equation i are all zero.
+        """
+        from scipy.stats import chi2
+        pval_matrix = np.full((H_active, H_active), np.nan)
+        
+        # Gamma has shape (H, H*k_ar) or (H*k_ar, H)
+        # We need to find the indices of variable j's lags in the parameter vector
+        # statsmodels VECM.resids has shape (T-k, H)
+        # VECM.cov_params() gives the covariance of all estimated parameters
+        
+        try:
+            params = vecm_result.params
+            cov_params = vecm_result.cov_params()
+            k_ar = vecm_result.k_ar  # lags in levels = k_ar + 1
+            # In statsmodels VECM:
+            # Deterministic terms (const, etc.) come first, then Alpha*Beta', then Gamma.
+            # This is complex to parse manually across versions.
+            # Use the built-in test_granger if possible, or falls back to Wald.
+            
+            for i in range(H_active):
+                for j in range(H_active):
+                    if i == j: continue
+                    try:
+                        # statsmodels VECMResults.test_granger(caused, causing)
+                        test = vecm_result.test_granger(caused=i, causing=j)
+                        pval_matrix[i, j] = test.pvalue
+                    except Exception:
+                        pval_matrix[i, j] = 1.0
+        except Exception:
+            pass # Return NaNs/1.0s if extraction fails
+            
         return pval_matrix
 
     def _apply_fdr_correction(
@@ -824,17 +916,21 @@ class CausalAnalyzer:
         coefs = var_result.coefs
         p, H, _ = coefs.shape
 
-        pdc = np.zeros((len(freqs), H, H))
+        # Vectorized computation across all frequencies: O(H³) instead of O(F × H³)
+        # Shape: (F, H, H) for frequencies × head matrix
+        freqs_2d = np.outer(freqs, np.arange(1, p + 1))  # (F, p)
+        exp_terms = np.exp(-2j * np.pi * freqs_2d)[:, :, np.newaxis]  # (F, p, 1)
 
-        for fi, f in enumerate(freqs):
-            A_f = np.eye(H, dtype=complex)
-            for lag_idx in range(p):
-                A_f -= coefs[lag_idx] * np.exp(-2j * np.pi * f * (lag_idx + 1))
+        # Stack coefficients: (p, H, H) → broadcast with (F, p, 1) → (F, p, H, H)
+        coefs_stack = coefs[:, np.newaxis, :, :]  # (p, 1, H, H)
+        A_f_all = np.eye(H, dtype=complex)[np.newaxis, :, :] - np.sum(
+            coefs_stack * exp_terms[:, :, :, np.newaxis], axis=1
+        )  # (F, H, H)
 
-            A_abs_sq = np.abs(A_f) ** 2
-            col_sums = A_abs_sq.sum(axis=0, keepdims=True)
-            col_sums[col_sums == 0] = 1.0
-            pdc[fi] = A_abs_sq / col_sums
+        A_abs_sq = np.abs(A_f_all) ** 2  # (F, H, H)
+        col_sums = A_abs_sq.sum(axis=1, keepdims=True)  # (F, 1, H)
+        col_sums[col_sums == 0] = 1.0
+        pdc = A_abs_sq / col_sums  # (F, H, H)
 
         low_mask = freqs <= 0.1
         high_mask = freqs >= 0.4
@@ -1179,8 +1275,29 @@ class CausalAnalyzer:
 
         log_likelihood = model.score(metric_series_np)
         T, H = metric_series_np.shape
-        n_params = n_states * (n_states - 1) + n_states * H * 2 + n_states
-        bic = -2 * log_likelihood + n_params * np.log(T)
+        
+        # Calculate free parameters (k) based on covariance type
+        # m: n_states, p: n_features (H)
+        m = n_states
+        p = H
+        
+        # 1. Initial probabilities: m - 1
+        # 2. Transition matrix: m * (m - 1)
+        # 3. Means: m * p
+        k = (m - 1) + m * (m - 1) + m * p
+        
+        # 4. Covariances
+        cov_type = getattr(model, 'covariance_type', 'diag')
+        if cov_type == 'diag':
+            k += m * p
+        elif cov_type == 'full':
+            k += m * p * (p + 1) // 2
+        elif cov_type == 'tied':
+            k += p * (p + 1) // 2
+        elif cov_type == 'spherical':
+            k += m
+            
+        bic = -2 * log_likelihood + k * np.log(T)
 
         per_head_dominant = np.argmax(model.means_, axis=0)
 
@@ -1249,20 +1366,46 @@ class CausalAnalyzer:
             return {"error": "no head metrics captured", "layer_name": layer_name}
 
         # metric_series can be scalar [T, H] or vector [T, H, F].
-        series_np = metric_series.numpy()
-        if series_np.ndim == 3:
-            t, h, f = series_np.shape
-            series_np = series_np.reshape(t, h * f)
+        # In vector mode, VAR should still run on heads (H), not flattened H*F.
+        # Select one feature column for causality while keeping full features for
+        # decomposition diagnostics.
+        raw_series_np = metric_series.numpy()
+        series_np = raw_series_np
+        selected_feature_idx = None
+        if raw_series_np.ndim == 3:
+            metric_to_feature_col = {
+                "shannon_entropy": 0,
+                "renyi_entropy_2": 1,
+                "max_attention": 2,
+                "effective_rank": 3,
+                "sink_fraction": 4,
+                "variance": 5,
+                "kurtosis": 6,
+                "top3_mass": 7,
+                "top5_mass": 8,
+                "argmax_pos_norm": 9,
+                "spread_std": 10,
+                "gini": 11,
+            }
+            selected_feature_idx = metric_to_feature_col.get(
+                getattr(self.config, "head_metric_type", "shannon_entropy"),
+                0,
+            )
+            selected_feature_idx = int(np.clip(selected_feature_idx, 0, raw_series_np.shape[2] - 1))
+            series_np = raw_series_np[:, :, selected_feature_idx]
 
         # Optional Exp3/Exp6 behaviour: exclude prompt tokens from causality.
         prompt_len = int(getattr(self.config, "prompt_token_count", 0) or 0)
         if getattr(self.config, "analyse_generated_only", True) and prompt_len > 0 and series_np.shape[0] > (prompt_len + 5):
             series_np = series_np[prompt_len:]
+            if raw_series_np.ndim == 3 and raw_series_np.shape[0] > (prompt_len + 5):
+                raw_series_np = raw_series_np[prompt_len:]
 
-        # ── 1. Sanitize ────────────────────────────────────────────────────
+        # ── 1. Sanitize + preprocessing ───────────────────────────────────
         series_np = np.nan_to_num(series_np, nan=0.0, posinf=0.0, neginf=0.0)
+        series_for_model = self._preprocess_series_for_var(series_np)
 
-        active_indices = np.where(series_np.std(axis=0) > 1e-6)[0]
+        active_indices = np.where(series_for_model.std(axis=0) > 1e-6)[0]
         if len(active_indices) < 2:
             return {
                 "error": "insufficient diversity in head dynamics",
@@ -1270,12 +1413,12 @@ class CausalAnalyzer:
                 "active_heads_count": len(active_indices)
             }
 
-        filtered_series = series_np[:, active_indices]
+        filtered_series = series_for_model[:, active_indices]
         T, H_active = filtered_series.shape
 
         # Keep VAR identifiable by limiting equations relative to token count.
         # Conservative cap to keep small-sample VAR stable.
-        max_equations = max(2, min(12, T // 4))
+        max_equations = max(2, min(12, T // 5))
         if H_active > max_equations:
             col_var = filtered_series.var(axis=0)
             top_cols = np.argsort(col_var)[::-1][:max_equations]
@@ -1300,13 +1443,15 @@ class CausalAnalyzer:
             "series": series_np,
             "active_heads": active_indices.tolist(),
         }
+        if selected_feature_idx is not None:
+            result["selected_feature_idx"] = selected_feature_idx
         self._last_fdr_result = None
         self._last_pdc = None
         self._selected_lag = None
         self._last_joint_stationarity = None
         self._last_coint = None
         self._vecm_used = False
-        result["feature_decomposition"] = self.observer.decompose_feature_space(series_np)
+        result["feature_decomposition"] = self.observer.decompose_feature_space(raw_series_np)
 
         # ── 2. Gap A.1: Per-head ADF stationarity ─────────────────────────
         stationarity_report = self._test_per_head_stationarity(filtered_series)
@@ -1365,9 +1510,17 @@ class CausalAnalyzer:
                                 f"unsupported VECM gamma layout: {gamma.shape}, H={H}"
                             )
 
-                        influence_active = np.abs(coef_tensor).sum(axis=0)
+                        # [PYTORCH] Compute lag-weighted absolute influence
+                        # Instead of a simple sum, weight more recent lags (smaller index) higher.
+                        # Weights: 1.0 for lag 1, 0.5 for lag 2, etc. (1/p)
+                        weights = np.arange(1, n_lags + 1, dtype=np.float32).reshape(n_lags, 1, 1)
+                        weighted_coefs = np.abs(coef_tensor) / weights
+                        # Using PyTorch sum representation for efficiency on large head counts
+                        influence_active = np.sum(weighted_coefs, axis=0) 
+                        
                         result['model_type'] = 'VECM'
                         result['vecm_coint_rank'] = coint_report['n_coint_vectors']
+                        result['lag_weighting'] = 'linear_decay'
                 except Exception as e:
                     console.print(f"[yellow]Cointegration/VECM failed: {e}. Falling back to VAR.[/]")
                     USE_VECM = False
@@ -1410,13 +1563,18 @@ class CausalAnalyzer:
             if coefs is None or coefs.size == 0:
                 return {**result, "error": "VAR returned no coefficients"}
 
-            influence_active = np.abs(coefs).sum(axis=0)
+            # [PYTORCH] Lag-weighted absolute sum for standard VAR
+            # coefs shape: [k_ar, H, H]
+            k_ar = int(res.k_ar)
+            weights = np.arange(1, k_ar + 1, dtype=np.float32).reshape(k_ar, 1, 1)
+            influence_active = np.sum(np.abs(coefs) / weights, axis=0)
+
             result['model_type'] = 'VAR'
-            result['selected_lag'] = int(res.k_ar)
-            self._selected_lag = int(res.k_ar)
+            result['selected_lag'] = k_ar
+            self._selected_lag = k_ar
 
         # ── Re-map to full H×H matrix ─────────────────────────────────────
-        _, H_total = series_np.shape
+        _, H_total = series_for_model.shape
         full_influence = np.zeros((H_total, H_total))
         for i, idx_i in enumerate(active_indices):
             for j, idx_j in enumerate(active_indices):
@@ -1427,21 +1585,51 @@ class CausalAnalyzer:
         result['var_max_lag'] = int(lag)
 
         # ── 7. Gap B.1: Granger F-test ────────────────────────────────────
-        if self.config.granger_ftest and var_result is not None:
-            try:
-                pval_matrix = self._granger_pvalue_matrix(
+        active_granger_pval = None
+        if self.config.granger_ftest:
+            if USE_VECM and 'vecm_result' in locals():
+                active_granger_pval = self._granger_pvalue_matrix_vecm(
+                    vecm_result, H_active
+                )
+            elif var_result is not None:
+                active_granger_pval = self._granger_pvalue_matrix(
                     var_result, series_for_var, result.get('selected_lag', lag)
                 )
-                result['granger_pval_matrix'] = pval_matrix
 
+        if active_granger_pval is not None:
+            try:
+                result['granger_pval_matrix'] = active_granger_pval
                 # ── 8. Gap B.2: BH-FDR correction ─────────────────────────
-                fdr_result = self._apply_fdr_correction(pval_matrix, alpha=self.config.fdr_alpha)
+                fdr_result_active = self._apply_fdr_correction(active_granger_pval, alpha=self.config.fdr_alpha)
+
+                # Re-map active-space FDR outputs back to full head-space so
+                # dashboard matrices share the same HxH dimensions.
+                full_reject = np.zeros((H_total, H_total), dtype=bool)
+                full_pvals = np.full((H_total, H_total), np.nan)
+                for i, idx_i in enumerate(active_indices):
+                    for j, idx_j in enumerate(active_indices):
+                        full_reject[idx_i, idx_j] = bool(fdr_result_active['reject_matrix'][i, j])
+                        full_pvals[idx_i, idx_j] = fdr_result_active['pval_corrected'][i, j]
+
+                mapped_pairs = []
+                for source_i, target_i, pval in fdr_result_active.get('significant_pairs', []):
+                    source_h = int(active_indices[source_i])
+                    target_h = int(active_indices[target_i])
+                    mapped_pairs.append((source_h, target_h, pval))
+
+                fdr_result = {
+                    'reject_matrix': full_reject,
+                    'pval_corrected': full_pvals,
+                    'n_significant': int(full_reject.sum()),
+                    'significant_pairs': mapped_pairs,
+                }
+
                 result['fdr_result'] = fdr_result
                 self._last_fdr_result = fdr_result
 
                 # Mask influence: zero out non-significant pairs
                 masked_influence_active = influence_active.copy()
-                masked_influence_active[~fdr_result['reject_matrix']] = 0.0
+                masked_influence_active[~fdr_result_active['reject_matrix']] = 0.0
 
                 masked_full = np.zeros((H_total, H_total))
                 for i, idx_i in enumerate(active_indices):

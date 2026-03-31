@@ -21,7 +21,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from rich.console import Console
 from chronoscope import (
     ChronoscopeConfig, 
-    load_model, 
+    load_model,
+    detect_num_attention_heads,
+    detect_hidden_dim,
     ChronoscopeInterceptor, 
     SignalObserver, 
     CausalAnalyzer, 
@@ -542,6 +544,19 @@ async def run(config: ChronoscopeConfig, prompt: str = None):
     # Users can pass --head-feature-mode vector if they want per-head feature vectors
     
     model, tokenizer = load_model(config)
+    
+    # Auto-detect model architecture parameters
+    detected_heads = detect_num_attention_heads(model)
+    detected_dim = detect_hidden_dim(model)
+    
+    if detected_heads and detected_heads > 0:
+        console.print(f"  [cyan]AUTO-DETECTED:[/] {detected_heads} attention heads (configured: {config.n_heads})")
+        config.n_heads = detected_heads
+    
+    if detected_dim and detected_dim > 0:
+        console.print(f"  [cyan]AUTO-DETECTED:[/] {detected_dim} hidden dimension (configured: {config.hidden_dim})")
+        config.hidden_dim = detected_dim
+    
     interceptor = ChronoscopeInterceptor(model, tokenizer, config)
     observer = SignalObserver(config)
     analyzer = CausalAnalyzer(interceptor, observer, config)

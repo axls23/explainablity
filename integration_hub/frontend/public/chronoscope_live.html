@@ -553,7 +553,20 @@ const RT = {
   varTab:      'inf',
   logCount:    0,
   interpIdx:   0,
-  entropy_history: {},   // head → number[]
+  entropy_history_by_metric: {
+    shannon: {},
+    renyi: {},
+    effrank: {},
+    sink: {},
+    maxattn: {},
+  },   // metric -> (head -> number[])
+  entropy_labels_by_metric: {
+    shannon: [],
+    renyi: [],
+    effrank: [],
+    sink: [],
+    maxattn: [],
+  },   // metric -> token labels[]
   ec_series:   [],
   hmm_seq:     [],
   hmm_states:  [],
@@ -710,7 +723,20 @@ function processFrame(f) {
   if(f.n_heads && f.n_heads !== RT.n_heads){
     RT.n_heads = f.n_heads;
     initCharts(RT.n_heads);
-    RT.entropy_history = {};
+    RT.entropy_history_by_metric = {
+      shannon: {},
+      renyi: {},
+      effrank: {},
+      sink: {},
+      maxattn: {},
+    };
+    RT.entropy_labels_by_metric = {
+      shannon: [],
+      renyi: [],
+      effrank: [],
+      sink: [],
+      maxattn: [],
+    };
   }
   if(f.n_heads && !charts.entropy){
     initCharts(RT.n_heads);
@@ -762,7 +788,7 @@ function processFrame(f) {
   if(f.stat_per_head) renderStationarity(f.stat_per_head, f.coint_rank, f.vecm_used);
 
   // ── Gap A — Entropy stream ────────────────────────────────────────────
-  if(f.entropy_row) updateEntropyChart(f.token_idx, f.entropy_row);
+  if(f.entropy_row) updateEntropyChart(f.token_idx, f.entropy_row, f.head_metric);
 
   // ── Gap B — VAR influence matrix ──────────────────────────────────────
   if(f.influence_matrix && f.fdr_reject)
@@ -884,23 +910,57 @@ function updateRegimeBadge(verdict){
   rb.style.borderColor   = bc;
 }
 
-function updateEntropyChart(tokenIdx, row){
+function metricKeyFromBackend(headMetric){
+  const map = {
+    shannon_entropy: 'shannon',
+    renyi_entropy_2: 'renyi',
+    effective_rank: 'effrank',
+    sink_fraction: 'sink',
+    max_attention: 'maxattn',
+  };
+  return map[headMetric] || 'shannon';
+}
+
+function redrawEntropyChartForMetric(metricKey){
   if(!charts.entropy) return;
-  const h = row.length;
-  // Initialise per-head history on first call
-  for(let i=0; i<h; i++){
-    if(!RT.entropy_history[i]) RT.entropy_history[i] = [];
-    RT.entropy_history[i].push(row[i]);
-    if(RT.entropy_history[i].length > CFG.ENTROPY_WINDOW)
-      RT.entropy_history[i].shift();
-  }
-  const len  = RT.entropy_history[0]?.length || 0;
-  const base = Math.max(0, (tokenIdx ?? len-1) - len + 1);
-  charts.entropy.data.labels = Array.from({length:len}, (_,i)=>String(base+i));
+  const hist = RT.entropy_history_by_metric[metricKey] || {};
+  const labels = RT.entropy_labels_by_metric[metricKey] || [];
+  const len = labels.length;
+
+  charts.entropy.data.labels = labels.slice();
   charts.entropy.data.datasets.forEach((ds, i) => {
-    ds.data = RT.entropy_history[i] || [];
+    ds.data = hist[i] || [];
   });
+
+  const yMaxByMetric = {shannon:5, renyi:12, effrank:1, sink:2, maxattn:1};
+  const yMax = yMaxByMetric[metricKey] || 5;
+  charts.entropy.options.scales.y.max = yMax;
+  charts.entropy.options.scales.y.stepSize = yMax <= 1 ? 0.2 : 1;
   charts.entropy.update('none');
+}
+
+function updateEntropyChart(tokenIdx, row, headMetric){
+  if(!charts.entropy) return;
+  const metricKey = metricKeyFromBackend(headMetric);
+  const hist = RT.entropy_history_by_metric[metricKey];
+  const labels = RT.entropy_labels_by_metric[metricKey];
+  const h = row.length;
+
+  // Initialise per-head history on first call for this metric
+  for(let i=0; i<h; i++){
+    if(!hist[i]) hist[i] = [];
+    hist[i].push(row[i]);
+    if(hist[i].length > CFG.ENTROPY_WINDOW)
+      hist[i].shift();
+  }
+
+  labels.push(String(tokenIdx ?? labels.length));
+  if(labels.length > CFG.ENTROPY_WINDOW) labels.shift();
+
+  // Redraw immediately if this is the active feature tab.
+  if(RT.featTab === metricKey){
+    redrawEntropyChartForMetric(metricKey);
+  }
 }
 
 function renderMatrix(infMat, fdrReject, pvalMat, sigPairs){
@@ -911,16 +971,20 @@ function renderMatrix(infMat, fdrReject, pvalMat, sigPairs){
   g.style.gridTemplateRows    = `repeat(${H},1fr)`;
   const tt = document.getElementById('tt');
   let sigCount = 0;
+  const asBool = (v) => (v === true || v === 1 || v === '1' || v === 'true');
   for(let i=0; i<H; i++){
     for(let j=0; j<H; j++){
       const v    = infMat[i][j];
-      const isSig = fdrReject?.[i]?.[j] ?? false;
+      const isSig = asBool(fdrReject?.[i]?.[j]);
       const pval  = pvalMat?.[i]?.[j];
       if(isSig) sigCount++;
       const c = document.createElement('div');
       c.className = 'mc';
       if(i===j){ c.style.background = 'var(--bg0)'; }
-      else if(!isSig){ c.style.background = `rgba(28,45,62,${Math.min(v/.3,.3)+.03})`; }
+      else if(!isSig){
+        // Strict FDR masking: non-significant pairs render as low-contrast background.
+        c.style.background = 'rgba(28,45,62,0.08)';
+      }
       else {
         const n = Math.min(v/1.5, 1);
         c.style.background = v>1
@@ -943,7 +1007,7 @@ function renderMatrix(infMat, fdrReject, pvalMat, sigPairs){
   }
   const total = H*(H-1);
   document.getElementById('mat-stats').textContent =
-    `${sigCount/2|0} FDR-sig pairs · ${total} tested`;
+    `${sigCount} FDR-sig pairs · ${total} tested`;
   const topPair = sigPairs?.[0];
   document.getElementById('mat-cap').textContent = topPair
     ? `top: H${topPair.source}→H${topPair.target} (${topPair.score?.toFixed(3)}) · VECM=${document.getElementById('v-coint').textContent}`
@@ -1416,8 +1480,37 @@ function setFeatTab(feat){
   });
   const formulas={shannon:'H=−Σp·logp',renyi:'H₂=−log(Σp²)',effrank:'exp(H)/T',sink:'p[BOS]',maxattn:'max(p)'};
   document.getElementById('feat-formula').textContent=formulas[feat];
-  // Signal the backend to switch the metric — post a message the Python side can intercept
-  window.dispatchEvent(new CustomEvent('chronoscope:metric_change', {detail:{metric:feat}}));
+
+  // Instant redraw from already stored data for this metric.
+  redrawEntropyChartForMetric(feat);
+
+  // Switch backend active metric so incoming entropy_row streams match the selected tab.
+  fetch('http://127.0.0.1:8000/set_metric', {
+    method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body: JSON.stringify({metric: feat})
+  })
+    .then(async r => {
+      if(!r.ok){
+        let detail = '';
+        try {
+          const j = await r.json();
+          detail = j?.detail ? ` (${j.detail})` : '';
+        } catch(_) {}
+        throw new Error(`HTTP ${r.status}${detail}`);
+      }
+      return r.json();
+    })
+    .then(data => {
+      if(data?.head_metric_type){
+        document.getElementById('v-feat').textContent = data.head_metric_type;
+        document.getElementById('v-feat').style.color = 'var(--cyan)';
+      }
+      addLog('ok', `metric switched → ${feat.toUpperCase()}`);
+    })
+    .catch(err => {
+      addLog('err', `metric switch failed: ${err.message}`);
+    });
 }
 
 // ── WEBSOCKET CONNECTION ──────────────────────────────────────────────────────

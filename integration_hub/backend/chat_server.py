@@ -38,7 +38,7 @@ from pydantic import BaseModel, Field
 import uvicorn
 
 from chronoscope.config import ChronoscopeConfig
-from chronoscope.models import load_model, get_deepest_layer
+from chronoscope.models import load_model, get_deepest_layer, detect_num_attention_heads, detect_hidden_dim
 from chronoscope.interceptor import ChronoscopeInterceptor
 from chronoscope.observer import SignalObserver
 from chronoscope.analyzer import CausalAnalyzer
@@ -58,6 +58,28 @@ class ChatRequest(BaseModel):
     run_intervention: bool = Field(default=True, description="Run head knockout intervention (top-3 heads, deepest layer)")
 
 
+class MetricRequest(BaseModel):
+    metric: str = Field(..., min_length=1, description="Metric key from dashboard tab")
+
+
+class VarTuningRequest(BaseModel):
+    fdr_alpha: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+    var_preprocess_enable: Optional[bool] = None
+    var_preprocess_logit_bounded: Optional[bool] = None
+    var_preprocess_scale: Optional[str] = Field(default=None, pattern="^(none|zscore|robust)$")
+    var_preprocess_remove_global_mean: Optional[bool] = None
+    var_preprocess_clip: Optional[float] = None
+
+
+_UI_TO_METRIC = {
+    "shannon": "shannon_entropy",
+    "renyi": "renyi_entropy_2",
+    "effrank": "effective_rank",
+    "sink": "sink_fraction",
+    "maxattn": "max_attention",
+}
+
+
 from pydantic import BaseModel, Field, model_validator
 
 def _sanitize_numpy(obj):
@@ -67,12 +89,21 @@ def _sanitize_numpy(obj):
         item = obj.item()
         # Ensure we return native bool/int/float, since numpy scalar .item() does this
         return item
+    if hasattr(obj, "detach") and hasattr(obj, "cpu") and hasattr(obj, "tolist"):
+        # torch.Tensor support for debug endpoints
+        return _sanitize_numpy(obj.detach().cpu().tolist())
     if isinstance(obj, np.ndarray):
         return [_sanitize_numpy(v) for v in obj.tolist()]
     if isinstance(obj, dict):
         return {k: _sanitize_numpy(v) for k, v in obj.items()}
     if isinstance(obj, list):
         return [_sanitize_numpy(v) for v in obj]
+    if isinstance(obj, tuple):
+        return [_sanitize_numpy(v) for v in obj]
+    if isinstance(obj, set):
+        return [_sanitize_numpy(v) for v in obj]
+    if isinstance(obj, float) and (obj != obj):
+        return None
     return obj
 
 class ChatResponse(BaseModel):
@@ -117,12 +148,27 @@ def initialize_system():
 
     # ── Config ────────────────────────────────────────────────────────
     _config = ChronoscopeConfig()
+    # Live dashboard should capture all per-head metric features in parallel.
+    _config.head_feature_mode = "vector"
     print(f"  Model:  {_config.model_name}")
     print(f"  Device: {_config.device}")
+    print(f"  Head metric mode: {_config.head_feature_mode}")
 
     # ── Load model ────────────────────────────────────────────────────
     _model, _tokenizer = load_model(_config)
     print("[OK] Model loaded")
+
+    # ── Auto-detect model architecture parameters ─────────────────────
+    detected_heads = detect_num_attention_heads(_model)
+    detected_dim = detect_hidden_dim(_model)
+    
+    if detected_heads and detected_heads > 0:
+        print(f"  [AUTO] Detected {detected_heads} attention heads (configured: {_config.n_heads})")
+        _config.n_heads = detected_heads
+    
+    if detected_dim and detected_dim > 0:
+        print(f"  [AUTO] Detected {detected_dim} hidden dimension (configured: {_config.hidden_dim})")
+        _config.hidden_dim = detected_dim
 
     # ── Analysis components ───────────────────────────────────────────
     _interceptor = ChronoscopeInterceptor(_model, _tokenizer, _config)
@@ -195,6 +241,7 @@ def run_post_analysis_background(target_layer, current_traj, prompt_len, token_c
     print("[*] Background: Running post-generation analysis...")
     if _bridge:
         _bridge.push_log("ok", f"Generation complete ({token_count} tokens). Running deep analysis...")
+    fdr_sig_pairs = None
 
     try:
         if target_layer and target_layer in current_traj:
@@ -238,6 +285,7 @@ def run_post_analysis_background(target_layer, current_traj, prompt_len, token_c
                         prompt  # No layer_name → analyzer auto-selects mid + deepest layers
                     )
                     if "error" not in head_result:
+                        fdr_sig_pairs = int((head_result.get("fdr_result") or {}).get("n_significant", 0))
                         if _bridge:
                             _bridge.push_var_frame(head_result)
                             _bridge.push_log("ok", "VAR analysis complete")
@@ -267,37 +315,89 @@ def run_post_analysis_background(target_layer, current_traj, prompt_len, token_c
 
                             fdr_res = head_result.get("fdr_result") or {}
                             sig_pairs = fdr_res.get("significant_pairs", [])
+                            source_heads = []
                             if sig_pairs:
-                                # Cap to top-3 source heads and deepest layer only (performance)
+                                # Primary path: top FDR-significant source heads.
                                 source_heads = list(dict.fromkeys(
                                     int(p[0]) for p in sig_pairs
                                 ))[:3]
-                                probe_layers = [target_layer] if target_layer else []
+                            else:
+                                # Demo fallback: if FDR is empty, probe strongest raw-influence
+                                # sources so the perturbation panel can still provide signal.
+                                influence = head_result.get("influence_matrix")
+                                try:
+                                    inf = np.asarray(influence, dtype=float)
+                                    if inf.ndim == 2 and inf.shape[0] == inf.shape[1] and inf.shape[0] >= 2:
+                                        score = inf.copy()
+                                        np.fill_diagonal(score, -np.inf)
+                                        flat_order = np.argsort(score, axis=None)[::-1]
+                                        for flat_idx in flat_order:
+                                            i, j = np.unravel_index(flat_idx, score.shape)
+                                            v = score[i, j]
+                                            if not np.isfinite(v) or v <= 0.0:
+                                                continue
+                                            if int(j) not in source_heads:
+                                                source_heads.append(int(j))
+                                            if len(source_heads) >= 3:
+                                                break
+                                        if source_heads and _bridge:
+                                            _bridge.push_log(
+                                                "pert",
+                                                "No FDR-significant pairs; using top influence sources for intervention demo.",
+                                            )
+                                except Exception:
+                                    source_heads = []
+
+                            if source_heads:
+                                # Use target_layer if available, else fall back to midpoint layer
+                                probe_layers = []
+                                if target_layer:
+                                    probe_layers = [target_layer]
+                                else:
+                                    # Fallback: use deepest available layer from activation dict
+                                    if current_traj and current_traj.keys():
+                                        fallback_layer = get_deepest_layer(current_traj.keys())
+                                        if fallback_layer:
+                                            probe_layers = [fallback_layer]
+                                            print(f"[*] No target_layer, using fallback: {fallback_layer}")
 
                                 if probe_layers:
-                                    causal_impact = _analyzer.interventional_head_causality_multilayer(
-                                        prompt, probe_layers, source_heads
-                                    )
-                                    per_head = causal_impact.get("per_head_results", [])
+                                    try:
+                                        causal_impact = _analyzer.interventional_head_causality_multilayer(
+                                            prompt, probe_layers, source_heads
+                                        )
+                                        per_head = causal_impact.get("per_head_results", [])
 
-                                    if per_head and _bridge:
-                                        pert_results = [
-                                            {
-                                                "head":          int(r["head"]),
-                                                "target":        int(r.get("target_head", -1)),
-                                                "mode":          "zero",
-                                                "delta_entropy": float(r.get("delta_entropy", 0.0)),
-                                                "restoration":   float(r.get("restoration", 0.0)),
-                                                "kl_patch":      float(r.get("kl_patch", 0.0)),
-                                                "confirmed":     float(r.get("restoration", 0.0)) > 0.5,
-                                            }
-                                            for r in per_head
-                                        ]
-                                        _bridge.push_perturbation_frame(pert_results, None)
-                                        _bridge.push_log("ok", f"Interventions complete on {len(pert_results)} heads")
+                                        if per_head and _bridge:
+                                            pert_results = [
+                                                {
+                                                    "head":          int(r["head"]),
+                                                    "target":        int(r.get("target_head", -1)),
+                                                    "mode":          "zero",
+                                                    "delta_entropy": float(r.get("delta_entropy", 0.0)),
+                                                    "restoration":   float(r.get("restoration", 0.0)),
+                                                    "kl_patch":      float(r.get("kl_patch", 0.0)),
+                                                    "confirmed":     float(r.get("restoration", 0.0)) > 0.5,
+                                                }
+                                                for r in per_head
+                                            ]
+                                            _bridge.push_perturbation_frame(pert_results, None)
+                                            _bridge.push_log("ok", f"Interventions complete on {len(pert_results)} heads")
+                                        else:
+                                            print(f"[!] No intervention results returned (per_head empty)")
+                                            if _bridge:
+                                                _bridge.push_log("pert", f"Intervention analysis yielded no results")
+                                    except Exception as pert_err:
+                                        print(f"[!] Intervention error: {pert_err}")
+                                        if _bridge:
+                                            _bridge.push_log("err", f"Intervention failed: {str(pert_err)[:60]}")
+                                else:
+                                    print(f"[!] No probe layers available for intervention")
+                                    if _bridge:
+                                        _bridge.push_log("pert", "No target layer for intervention")
                             else:
                                 if _bridge:
-                                    _bridge.push_log("pert", "No significant VAR pairs — skipping intervention.")
+                                    _bridge.push_log("pert", "No usable source heads found — skipping intervention.")
                     else:
                         if _bridge:
                             _bridge.push_log("err", f"VAR: {head_result['error']}")
@@ -330,7 +430,7 @@ def run_post_analysis_background(target_layer, current_traj, prompt_len, token_c
                             "spectral_coherence": _sf(validity.get("spectral_validity")),
                             "topo_smoothness": _sf(validity.get("tda_validity")),
                             "active_reasoning": _sf(validity.get("active_reasoning")),
-                            "fdr_sig_pairs": 0,
+                            "fdr_sig_pairs": fdr_sig_pairs,
                             "te_score": None,
                         },
                         {
@@ -379,6 +479,7 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks):
         # ── Stream generation with live analysis ─────────────────────
         full_response = ""
         token_count = 0
+        token_count_by_text = 0
         analysis_summary = {}
 
         try:
@@ -392,7 +493,15 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks):
                 sys.stdout.write(new_token)
                 sys.stdout.flush()
                 full_response += new_token
-                token_count += 1
+                try:
+                    # Streamers can emit multi-token text chunks. Count by
+                    # tokenizer delta over the cumulative generated text.
+                    current_count = len(_tokenizer.encode(full_response, add_special_tokens=False))
+                    delta = max(0, current_count - token_count_by_text)
+                    token_count_by_text = current_count
+                    token_count += delta if delta > 0 else 1
+                except Exception:
+                    token_count += 1
 
                 # ── Live analysis per token ──────────────────────────
                 target_layer = get_deepest_layer(current_traj.keys()) if current_traj else None
@@ -429,20 +538,22 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks):
                                 f"D.2: EC spike t={token_count} · "
                                 f"χ={live_stats.get('euler_characteristic', 0)}")
 
-                    # Push per-token entropy frame to dashboard (E3-K1)
-                    metric_series = _interceptor.get_head_metric_series(target_layer)
-                    if metric_series is not None and getattr(metric_series, "numel", lambda: 0)() > 0:
-                        row = metric_series[-1]
-                        if hasattr(row, "ndim") and row.ndim > 1:
-                            row = row[:, 0]
-                        if _bridge:
-                            _bridge.push_token_frame(
-                                token_idx=token_count,
-                                interceptor=_interceptor,
-                                observer=_observer,
-                                config=_config,
-                                entropy_row_override=row,
-                            )
+                # Push per-token entropy frame to dashboard (E3-K1)
+                # Do this even when current_traj is empty for a streamer chunk;
+                # bridge can pull latest metric row from interceptor cache.
+                if _bridge:
+                    row = None
+                    if target_layer:
+                        metric_series = _interceptor.get_head_metric_series(target_layer)
+                        if metric_series is not None and getattr(metric_series, "numel", lambda: 0)() > 0:
+                            row = metric_series[-1]
+                    _bridge.push_token_frame(
+                        token_idx=token_count,
+                        interceptor=_interceptor,
+                        observer=_observer,
+                        config=_config,
+                        entropy_row_override=row,
+                    )
 
                 # Cadenced signal quality (E2L-K1)
                 stat_every = getattr(_config, "dashboard_stat_every", 5)
@@ -510,6 +621,80 @@ async def health():
     }
 
 
+@app.post("/set_metric")
+async def set_metric(request: MetricRequest):
+    if not _config:
+        raise HTTPException(status_code=503, detail="Not initialized")
+
+    ui_metric = request.metric.strip().lower()
+    metric_key = _UI_TO_METRIC.get(ui_metric)
+    if metric_key is None:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown metric '{request.metric}'. Allowed: {', '.join(_UI_TO_METRIC.keys())}",
+        )
+
+    _config.head_metric_type = metric_key
+    return {
+        "status": "ok",
+        "ui_metric": ui_metric,
+        "head_metric_type": _config.head_metric_type,
+        "head_feature_mode": getattr(_config, "head_feature_mode", "scalar"),
+    }
+
+
+@app.post("/set_var_tuning")
+async def set_var_tuning(request: VarTuningRequest):
+    if not _config:
+        raise HTTPException(status_code=503, detail="Not initialized")
+
+    updates = {}
+
+    if request.fdr_alpha is not None:
+        _config.fdr_alpha = float(request.fdr_alpha)
+        updates["fdr_alpha"] = _config.fdr_alpha
+    if request.var_preprocess_enable is not None:
+        _config.var_preprocess_enable = bool(request.var_preprocess_enable)
+        updates["var_preprocess_enable"] = _config.var_preprocess_enable
+    if request.var_preprocess_logit_bounded is not None:
+        _config.var_preprocess_logit_bounded = bool(request.var_preprocess_logit_bounded)
+        updates["var_preprocess_logit_bounded"] = _config.var_preprocess_logit_bounded
+    if request.var_preprocess_scale is not None:
+        _config.var_preprocess_scale = request.var_preprocess_scale
+        updates["var_preprocess_scale"] = _config.var_preprocess_scale
+    if request.var_preprocess_remove_global_mean is not None:
+        _config.var_preprocess_remove_global_mean = bool(request.var_preprocess_remove_global_mean)
+        updates["var_preprocess_remove_global_mean"] = _config.var_preprocess_remove_global_mean
+    if request.var_preprocess_clip is not None:
+        _config.var_preprocess_clip = float(request.var_preprocess_clip)
+        updates["var_preprocess_clip"] = _config.var_preprocess_clip
+
+    return {
+        "status": "ok",
+        "updated": updates,
+        "effective": {
+            "fdr_alpha": getattr(_config, "fdr_alpha", None),
+            "var_preprocess_enable": getattr(_config, "var_preprocess_enable", None),
+            "var_preprocess_logit_bounded": getattr(_config, "var_preprocess_logit_bounded", None),
+            "var_preprocess_scale": getattr(_config, "var_preprocess_scale", None),
+            "var_preprocess_remove_global_mean": getattr(_config, "var_preprocess_remove_global_mean", None),
+            "var_preprocess_clip": getattr(_config, "var_preprocess_clip", None),
+        },
+    }
+
+
+@app.get("/debug/last_frame")
+async def debug_last_frame():
+    if not _bridge:
+        raise HTTPException(status_code=503, detail="Bridge not initialized")
+    frame = getattr(_bridge, "_last_frame", None) or {}
+    return {
+        "status": "ok",
+        "keys": sorted(list(frame.keys())),
+        "frame": _sanitize_numpy(frame),
+    }
+
+
 @app.get("/config")
 async def get_config():
     if not _config:
@@ -520,6 +705,76 @@ async def get_config():
         "n_heads": _config.n_heads,
         "hidden_dim": _config.hidden_dim,
         "target_layer": _config.target_layer,
+        "head_feature_mode": getattr(_config, "head_feature_mode", "scalar"),
+        "head_metric_type": getattr(_config, "head_metric_type", "shannon_entropy"),
+    }
+
+
+@app.get("/debug/metrics")
+async def debug_metrics():
+    """Inspect what head metrics have been captured by the interceptor."""
+    if not _interceptor:
+        raise HTTPException(status_code=503, detail="Interceptor not initialized")
+    
+    summary = _interceptor.debug_head_metric_summary()
+    
+    # Extract first timestep metrics for each layer for inspection
+    details = {}
+    for layer_key, series_list in _interceptor._head_metrics.items():
+        details[layer_key] = {
+            "num_timesteps": len(series_list),
+            "first_shape": str(series_list[0].shape) if series_list else "empty",
+            "last_shape": str(series_list[-1].shape) if series_list else "empty",
+        }
+    
+    # Also check what the latest frame tried to find
+    last_frame = getattr(_bridge, "_last_frame", {}) if _bridge else {}
+    
+    return {
+        "status": "ok",
+        "capture_attentions_config": _config.capture_attentions,
+        "metrics_summary": summary,
+        "metrics_details": details,
+        "last_frame_has_entropy_row": "entropy_row" in last_frame,
+        "last_frame_entropy_row_is_none": last_frame.get("entropy_row") is None,
+    }
+
+
+@app.get("/debug/perturbation")
+async def debug_perturbation():
+    """Check perturbation/ablation (Gap C) state in last frame."""
+    if not _bridge:
+        raise HTTPException(status_code=503, detail="Bridge not initialized")
+    
+    last_frame = getattr(_bridge, "_last_frame", {}) or {}
+    
+    return {
+        "status": "ok",
+        "has_perturbation_results": "perturbation_results" in last_frame,
+        "perturbation_count": len(last_frame.get("perturbation_results", [])),
+        "first_pert": last_frame.get("perturbation_results", [{}])[0] if last_frame.get("perturbation_results") else None,
+        "mediation_results_present": last_frame.get("mediation_results") is not None,
+        "last_frame_keys": list(last_frame.keys()),
+    }
+
+
+@app.get("/debug/websocket")
+async def debug_websocket():
+    """Check WebSocket server status and connected clients."""
+    if not _bridge:
+        raise HTTPException(status_code=503, detail="Bridge not initialized")
+    
+    ws_clients = getattr(_bridge, "_ws_clients", set())
+    ws_thread = getattr(_bridge, "_thread", None)
+    
+    return {
+        "status": "ok",
+        "websocket_port": getattr(_bridge, "ws_port", 8765),
+        "websocket_host": getattr(_bridge, "ws_host", "127.0.0.1"),
+        "connected_clients": len(ws_clients),
+        "ws_thread_alive": ws_thread.is_alive() if ws_thread else False,
+        "has_last_frame": getattr(_bridge, "_last_frame", None) is not None,
+        "last_frame_keys": sorted(list(getattr(_bridge, "_last_frame", {}).keys())),
     }
 
 

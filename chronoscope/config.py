@@ -12,11 +12,12 @@ class ChronoscopeConfig:
     """All experiment parameters in one place."""
 
     # --- Model ---
-    model_name = "gpt2"  # Change to "Qwen/Qwen2.5-0.5B" when downloaded
-    n_heads: int = 12  # GPT-2 has 12 heads; Qwen2.5-0.5B has 14
-    hidden_dim: int = 768  # GPT-2: 768; Qwen2.5-0.5B: 896
+    model_name = "Qwen/Qwen2.5-0.5B"
+    n_heads: int = 14
+    hidden_dim: int = 896
     total_tokens: int = 100
-    target_layer: int = 11  # GPT-2 has 12 layers (0-11); Qwen has 24 (0-23)
+    
+    target_layer: int = 23
     local_model_snapshot_path: Optional[str] = None
     use_airllm: bool = False # Direct loading is now primary (resolves disk space issues)
     device: str = "cuda" if torch.cuda.is_available() else "cpu"
@@ -37,7 +38,7 @@ class ChronoscopeConfig:
     # additional multivariate time series for head–head interaction analysis.
     capture_attentions: bool = True
     head_metric: str = "entropy"  # currently: "entropy" over attention weights
-    head_var_max_lag: int = 3     # maximum lag for VAR-based head interactions
+    head_var_max_lag: int = 2     # reduced for stability with short sequences
 
     # --- Observer (Classical TS) ---
     svd_components: int = 8  # Reduce hidden_dim → 8 principal components
@@ -55,7 +56,7 @@ class ChronoscopeConfig:
     optimize_sweep: bool = True
     
     # ── Analysis modes (Exp3 → Exp6) ───────────────────────────────────────
-    analyse_generated_only: bool = True   # exclude prompt tokens from VAR/TDA
+    analyse_generated_only: bool = False  # include prompt tokens to ensure VAR has enough samples
     prompt_token_count: int = 0           # set at runtime from tokenizer
 
     # ── Exp6 layer/head selection ──────────────────────────────────────────
@@ -88,6 +89,12 @@ class ChronoscopeConfig:
     var_max_lags: int = 5                     # ceiling for IC selection
     run_johansen_cointegration: bool = True   # VECM if cointegrated
     joint_stationarity_test: bool = True      # run both ADF + KPSS
+    var_preprocess_enable: bool = True        # apply numeric preprocessing before VAR/VECM
+    var_preprocess_logit_bounded: bool = True # logit-transform channels bounded in [0,1]
+    var_preprocess_scale: str = 'robust'      # 'none' | 'zscore' | 'robust'
+    var_preprocess_remove_global_mean: bool = True  # remove per-timestep common mode
+    var_preprocess_eps: float = 1e-6          # epsilon for stable transforms/division
+    var_preprocess_clip: Optional[float] = 10.0  # clip transformed channels; None disables
 
     # ── Gap B: Statistical Significance ────────────────────────────────────
     granger_ftest: bool = True                # Granger F-test p-value matrix
@@ -127,7 +134,7 @@ class ChronoscopeConfig:
 
     # ── Gap E: Signal Quality ──────────────────────────────────────────────
     head_metric_type: str = 'shannon_entropy' # 'shannon_entropy' | 'renyi_entropy_2' | 'effective_rank'
-    head_feature_mode: str = 'scalar'         # 'scalar' | 'vector' (5-dim)
+    head_feature_mode: str = 'scalar'         # 'scalar' | 'vector' (12-dim)
     remove_attention_sink: bool = True        # remove BOS sink artifact
     attention_sink_positions: Optional[List[int]] = None   # None = auto-detect
     compute_ov_metric: bool = False           # requires v_proj hook

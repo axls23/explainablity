@@ -12,6 +12,7 @@ Gap E upgrades:
 """
 
 import gc
+import threading
 import numpy as np
 import torch
 import torch.nn as nn
@@ -467,6 +468,73 @@ class ChronoscopeInterceptor:
             pad_token_id=self.tokenizer.pad_token_id,
         )
 
+        def _build_trajectory_snapshot() -> Dict[str, torch.Tensor]:
+            trajectory = {}
+            for name, tensors in list(self._activations.items()):
+                if not tensors:
+                    continue
+                stacked = torch.cat([t.squeeze(0) for t in tensors], dim=0)
+                max_cache = getattr(self.config, 'max_cache_size', 512)
+                if stacked.shape[0] > max_cache:
+                    stacked = stacked[-max_cache:]
+                self._activations[name] = [stacked.unsqueeze(0)]
+                trajectory[name] = stacked
+            return trajectory
+
+        # ── True streaming path (TextIteratorStreamer) ─────────────────
+        try:
+            from transformers import TextIteratorStreamer
+
+            streamer = TextIteratorStreamer(
+                self.tokenizer,
+                skip_prompt=True,
+                skip_special_tokens=True,
+            )
+            stream_kwargs = {**generation_kwargs, "streamer": streamer}
+
+            run_state = {"error": None, "outputs": None}
+
+            def _run_generate():
+                try:
+                    run_state["outputs"] = generation_model.generate(**stream_kwargs)
+                except Exception as e:
+                    run_state["error"] = e
+
+            worker = threading.Thread(target=_run_generate, daemon=True)
+            worker.start()
+
+            yielded_any = False
+            for text_chunk in streamer:
+                if not text_chunk:
+                    continue
+                yielded_any = True
+                trajectory = _build_trajectory_snapshot()
+                yield text_chunk, trajectory
+
+            worker.join()
+
+            if run_state["error"] is not None:
+                raise run_state["error"]
+
+            outputs = run_state["outputs"]
+            if self.config.capture_attentions and not self._head_metrics and outputs is not None:
+                self._populate_head_metrics_from_generation_attentions(outputs)
+
+            # Safety: if streamer produced no chunks, emit final decode once.
+            if not yielded_any and outputs is not None:
+                trajectory = _build_trajectory_snapshot()
+                new_text = self.tokenizer.decode(
+                    outputs.sequences[0, inputs["input_ids"].shape[1]:],
+                    skip_special_tokens=True,
+                )
+                if new_text:
+                    yield new_text, trajectory
+            gc.collect()
+            return
+        except Exception:
+            # Fall through to legacy non-streaming generation path.
+            pass
+
         # ── OOM-safe generation ────────────────────────────────────────
         outputs = None
         try:
@@ -521,19 +589,7 @@ class ChronoscopeInterceptor:
         if self.config.capture_attentions and not self._head_metrics:
             self._populate_head_metrics_from_generation_attentions(outputs)
 
-        trajectory = {}
-        # Keep all captured layers so downstream analysis can recurse over
-        # the full depth rather than only the deepest layer.
-        for name, tensors in list(self._activations.items()):
-            if not tensors:
-                continue
-            stacked = torch.cat([t.squeeze(0) for t in tensors], dim=0)
-            max_cache = getattr(self.config, 'max_cache_size', 512)
-            if stacked.shape[0] > max_cache:
-                stacked = stacked[-max_cache:]
-                
-            self._activations[name] = [stacked.unsqueeze(0)]
-            trajectory[name] = stacked
+        trajectory = _build_trajectory_snapshot()
         
         gc.collect()
         

@@ -85,6 +85,15 @@ def _state_label(state_id: int, mean_entropy: float) -> str:
     return f"PHASE·{state_id}" + ("·HI" if mean_entropy > 2.5 else "·LO")
 
 
+_METRIC_TO_FEATURE_COL = {
+    "shannon_entropy": 0,
+    "renyi_entropy_2": 1,
+    "max_attention": 2,
+    "effective_rank": 3,
+    "sink_fraction": 4,
+}
+
+
 class DashboardBridge:
     """Bridge Chronoscope runtime outputs into dashboard frames."""
 
@@ -179,8 +188,13 @@ class DashboardBridge:
                     entropy_row = metric_series[min(int(token_idx), _n - 1)]
 
         if entropy_row is not None and hasattr(entropy_row, "ndim") and entropy_row.ndim > 1:
-            # Vector mode [H, F] -> default to first feature (Shannon-like stream)
-            entropy_row = entropy_row[:, 0]
+            # Vector mode [H, F] -> select column from active metric type.
+            metric_key = getattr(config, "head_metric_type", "shannon_entropy")
+            col = _METRIC_TO_FEATURE_COL.get(metric_key, 0)
+            if entropy_row.shape[1] > col:
+                entropy_row = entropy_row[:, col]
+            else:
+                entropy_row = entropy_row[:, 0]
 
         velocity = None
         arc_steps = getattr(observer, "arc_steps", None)
@@ -542,7 +556,6 @@ class DashboardBridge:
             "topo_smoothness": _safe_float(composite.get("topo_smoothness")),
             "active_reasoning": _safe_float(composite.get("active_reasoning")),
             "te_score": _safe_float(composite.get("te_score")),
-            "sig_pairs": int(composite.get("fdr_sig_pairs", 0)),
             "verdict": composite.get("verdict", "MODERATE REASONING"),
             "log_events": [
                 {
@@ -551,6 +564,8 @@ class DashboardBridge:
                 }
             ],
         }
+        if composite.get("fdr_sig_pairs") is not None:
+            frame["sig_pairs"] = int(composite.get("fdr_sig_pairs", 0))
         if interpretation:
             frame["interpretation"] = interpretation
         self._send(frame)
@@ -597,7 +612,7 @@ class DashboardBridge:
         self.poll_path.write_text(json.dumps(frame, cls=_Encoder, allow_nan=False), encoding="utf-8")
 
     def _ws_broadcast(self, payload: str):
-        if not self._loop or not self._ws_clients:
+        if not self._loop or not self._loop.is_running() or not self._ws_clients:
             return
 
         async def _do_send():

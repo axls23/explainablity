@@ -108,7 +108,7 @@ async def report_node(state: InterpretabilityState, config: ChronoscopeConfig):
     
     # Format validity scores (mocked for this demo node)
     analyzer = config.shared_components["analyzer"]
-    scores = analyzer.compute_validity_score(
+    scores = analyzer.compute_fidelity_score(
         {}, # No DTW in this quick graph
         state["observer_results"].get("spectral", {}),
         state["tda_results"],

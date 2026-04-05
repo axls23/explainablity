@@ -493,10 +493,10 @@ async def report_node(state: InterpretabilityState, config: ChronoscopeConfig):
         
         # Try to populate dtw_sensitivity and spectral_coherence from official scorer (E1-K1)
         analyzer = config.shared_components.get("analyzer")
-        if analyzer and hasattr(analyzer, "compute_validity_score"):
+        if analyzer and hasattr(analyzer, "compute_fidelity_score"):
             try:
                 obs_results = state.get("observer_results", {})
-                official_validity = analyzer.compute_validity_score(
+                official_validity = analyzer.compute_fidelity_score(
                     dtw_result=state.get("dtw_results", {}),
                     spectral_result=obs_results.get("spectral", {}),
                     tda_result=state.get("tda_results", {}),

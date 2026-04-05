@@ -19,6 +19,8 @@ import asyncio
 import json
 import sys
 import os
+# Suppress KMeans memory leak warning on Windows with MKL (Gap D.4)
+os.environ["OMP_NUM_THREADS"] = "1"
 import webbrowser
 from typing import Optional, Set
 from contextlib import asynccontextmanager
@@ -47,6 +49,28 @@ from transformers import TextIteratorStreamer
 
 
 # ============================================================================
+# MIMIC MODE (AUTO-PILOT) CONFIG
+# ============================================================================
+
+_MIMIC_MODE = False
+_MIMIC_GALLERY = []
+_MIMIC_INDEX = 0
+_GALLERY_PATH = Path(__file__).parent.parent.parent / "chronoscope" / "reasoning_gallery.json"
+
+def _load_mimic_gallery():
+    global _MIMIC_GALLERY
+    if _GALLERY_PATH.exists():
+        try:
+            with open(_GALLERY_PATH, "r") as f:
+                _MIMIC_GALLERY = json.load(f)
+            print(f"[OK] Loaded {len(_MIMIC_GALLERY)} prompts into Mimic Gallery")
+        except Exception as e:
+            print(f"[!] Gallery load error: {e}")
+            _MIMIC_GALLERY = []
+
+_load_mimic_gallery()
+
+# ============================================================================
 # REQUEST / RESPONSE MODELS
 # ============================================================================
 
@@ -56,6 +80,7 @@ class ChatRequest(BaseModel):
     temperature: float = Field(default=0.7, ge=0.0, le=2.0)
     run_var: bool = Field(default=True, description="Run VAR head interaction analysis post-generation")
     run_intervention: bool = Field(default=True, description="Run head knockout intervention (top-3 heads, deepest layer)")
+    use_cot: bool = Field(default=False, description="Enable D.1 step-level segmentation for reasoning chains")
 
 
 class MetricRequest(BaseModel):
@@ -113,11 +138,16 @@ class ChatResponse(BaseModel):
     tokens_generated: int = 0
     analysis_summary: dict = {}
     message: str = ""
+    use_cot: bool = False
 
     @model_validator(mode='after')
     def sanitize_types(self):
         self.analysis_summary = _sanitize_numpy(self.analysis_summary)
         return self
+
+
+class MimicToggleRequest(BaseModel):
+    enabled: bool
 
 
 # ============================================================================
@@ -403,7 +433,7 @@ def run_post_analysis_background(target_layer, current_traj, prompt_len, token_c
                             _bridge.push_log("err", f"VAR: {head_result['error']}")
 
                 # Validity score
-                validity = _analyzer.compute_validity_score(
+                validity = _analyzer.compute_fidelity_score(
                     dtw_result={},
                     spectral_result=observer_results.get("spectral", {}),
                     tda_result=tda_results,
@@ -438,6 +468,11 @@ def run_post_analysis_background(target_layer, current_traj, prompt_len, token_c
                             "text": f"Score={composite_score}/100 · {verdict}",
                         },
                     )
+
+                # ── MIMIC MODE: Trigger next prompt ──────────────────────
+                if _MIMIC_MODE and _MIMIC_GALLERY:
+                    asyncio.create_task(_trigger_mimic_next())
+
     except Exception as e:
         print(f"[!] Background analysis error: {e}")
         import traceback
@@ -451,6 +486,13 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks):
     Accepts a prompt, generates token-by-token, and streams live
     Chronoscope analysis to the dashboard as the model reasons.
     """
+    return await _process_chat_request(request, background_tasks)
+
+
+async def _process_chat_request(request: ChatRequest, background_tasks: BackgroundTasks):
+    """
+    Internal shared logic for generation and analysis.
+    """
     global _model, _tokenizer, _config, _interceptor, _observer, _analyzer, _bridge
 
     if not _model or not _tokenizer:
@@ -463,10 +505,13 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks):
         prompt = request.prompt.strip()
         max_tokens = request.max_tokens
         temperature = request.temperature
+        
+        # Apply CoT/Step-Level Segmentation mode (Gap D.1)
+        _config.use_cot_time_axis = request.use_cot
 
         print(f"\n[CHAT] Prompt: {prompt[:80]}...")
         if _bridge:
-            _bridge.push_log("ok", f"New prompt: {prompt[:50]}...")
+            _bridge.push_log("ok", f"New prompt: {prompt[:50]}... {'[CoT On]' if request.use_cot else ''}")
 
         # ── Tokenize + measure prompt length ─────────────────────────
         inputs = _tokenizer(prompt, return_tensors="pt").to(_config.device)
@@ -481,6 +526,7 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks):
         token_count = 0
         token_count_by_text = 0
         analysis_summary = {}
+        current_traj = {}
 
         try:
             # Use capture_generation_stream for live token-by-token analysis
@@ -607,6 +653,67 @@ async def chat(request: ChatRequest, background_tasks: BackgroundTasks):
             analysis_summary=analysis_summary,
         )
 
+
+async def _trigger_mimic_next():
+    """Waits for a cooldown and then submits the next prompt from the gallery."""
+    global _MIMIC_INDEX, _MIMIC_MODE
+    
+    if not _MIMIC_MODE or not _MIMIC_GALLERY:
+        return
+
+    # User-friendly cooldown so you can see the results
+    await asyncio.sleep(8)
+    
+    # Check again in case it was disabled during sleep
+    if not _MIMIC_MODE:
+        return
+
+    import random
+    # Select randomly as requested
+    item = random.choice(_MIMIC_GALLERY)
+    prompt = item.get("prompt", "")
+    
+    if not prompt:
+        return
+
+    print(f"[MIMIC] Auto-triggering next prompt: {prompt[:40]}...")
+    
+    # Create a ChatRequest
+    req = ChatRequest(
+        prompt=prompt,
+        max_tokens=120,
+        temperature=0.7,
+        run_var=True,
+        run_intervention=True
+    )
+    
+    # We call the logic directly
+    bg = BackgroundTasks()
+    await _process_chat_request(req, bg)
+    # Manual execution of background tasks since we are bypassing FastAPI's automatic handler
+    for task in bg.tasks:
+        if asyncio.iscoroutinefunction(task.func):
+            asyncio.create_task(task.func(*task.args, **task.kwargs))
+        else:
+            task.func(*task.args, **task.kwargs)
+
+@app.post("/mimic/toggle")
+async def toggle_mimic(request: MimicToggleRequest):
+    global _MIMIC_MODE
+    _MIMIC_MODE = request.enabled
+    msg = "Mimic Mode (Auto-Pilot) ENABLED" if _MIMIC_MODE else "Mimic Mode DISABLED"
+    print(f"[*] {msg}")
+    if _bridge:
+        _bridge.push_log("ok" if _MIMIC_MODE else "info", msg)
+    return {"status": "ok", "mimic_mode": _MIMIC_MODE}
+
+@app.get("/mimic/status")
+async def mimic_status():
+    return {
+        "enabled": _MIMIC_MODE,
+        "gallery_size": len(_MIMIC_GALLERY),
+        "gallery_path": str(_GALLERY_PATH)
+    }
 
 # ============================================================================
 # UTILITY ENDPOINTS
@@ -814,7 +921,13 @@ async def chat_ui():
 <body>
 <header>
   <h1>⟐ Chronoscope Online</h1>
-  <p>Live chat with real-time analysis → <a href="http://localhost:8766" target="_blank">Open Dashboard</a></p>
+  <div style="display:flex; justify-content:space-between; align-items:center; width:100%;">
+    <p>Live chat with real-time analysis → <a href="http://localhost:8766" target="_blank">Open Dashboard</a></p>
+    <div style="display:flex; gap:12px; align-items:center;">
+      <span id="mimic-status" style="font-size:0.7em; padding:2px 6px; border-radius:4px; background:#ffffff10;">Mimic Off</span>
+      <button id="toggle-mimic" onclick="toggleMimic()" style="background:#ffffff15; color:#fff; border:1px solid #ffffff30; padding:4px 10px; border-radius:4px; font-size:0.75em; cursor:pointer;">Toggle Mimic Mode</button>
+    </div>
+  </div>
 </header>
 <div id="messages">
   <div class="msg assistant">Ready. Type a prompt and watch the <a href="http://localhost:8766" target="_blank">live dashboard</a> as the model reasons.</div>
@@ -827,6 +940,24 @@ async def chat_ui():
 const msgs = document.getElementById('messages');
 const inp = document.getElementById('prompt');
 const btn = document.getElementById('send');
+const mimicBtn = document.getElementById('toggle-mimic');
+const mimicStat = document.getElementById('mimic-status');
+
+let mimicActive = false;
+
+async function toggleMimic() {
+  mimicActive = !mimicActive;
+  try {
+    await fetch('/mimic/toggle', {
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({enabled: mimicActive})
+    });
+    mimicBtn.style.borderColor = mimicActive ? '#00ff88' : '#ffffff30';
+    mimicStat.textContent = mimicActive ? 'Mimic ON' : 'Mimic Off';
+    mimicStat.style.color = mimicActive ? '#00ff88' : '#888';
+  } catch(e) {}
+}
 
 inp.addEventListener('keydown', e => { if(e.key==='Enter' && !btn.disabled) sendChat(); });
 

@@ -194,7 +194,7 @@ def run(config: ChronoscopeConfig = None, prompt: str | None = None):
 
     # ── Step 8: Validity Score ──────────────────────────────────────────
     console.print(f"\n[bold]Step 8:[/] Computing validity...")
-    validity = analyzer.compute_validity_score(
+    validity = analyzer.compute_fidelity_score(
         dtw_result=dtw_results,
         spectral_result=observer_results["spectral"],
         tda_result=tda_results,

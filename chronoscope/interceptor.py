@@ -13,10 +13,11 @@ Gap E upgrades:
 
 import gc
 import threading
+import warnings
 import numpy as np
 import torch
 import torch.nn as nn
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Any, Union
 from rich.console import Console
 
 from .config import ChronoscopeConfig
@@ -170,8 +171,11 @@ class ChronoscopeInterceptor:
         B, H_heads, T_ctx = probs.shape
 
         # ── Effective rank via PyTorch SVD ──────────────────────────────
+        import warnings
         attn_batch = attn_weights[0].float()                      # [H, T, T]
-        svs_batch  = torch.linalg.svdvals(attn_batch)             # [H, min(T,T)]
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", category=UserWarning, message=".*SVD computation with the selected cusolver driver.*")
+            svs_batch  = torch.linalg.svdvals(attn_batch)             # [H, min(T,T)]
         svs_norm   = svs_batch / svs_batch.sum(dim=-1, keepdim=True).clamp_min(eps)
         svs_clamp  = svs_norm.clamp_min(eps)
         eff_rank_t = torch.exp(-(svs_clamp * torch.log(svs_clamp)).sum(dim=-1)) # [H]
@@ -227,13 +231,24 @@ class ChronoscopeInterceptor:
         argmax_pos_norm_np = np.argmax(p_np, axis=1) / max(1, p_np.shape[1] - 1)
 
         # Gini-like concentration on sorted attention weights.
+        # Population-normalized: subtract expected Gini of uniform distribution
+        # to make the coefficient invariant to population size n.
         n = p_sorted.shape[1]
         gini_num = (np.arange(1, n + 1)[None, :] * p_sorted).sum(axis=1)
-        gini_np = (2.0 * gini_num / max(n, 1)) - (n + 1) / max(n, 1)
-        gini_np = np.clip(gini_np, 0.0, 1.0)
+        gini_raw = (2.0 * gini_num / max(n, 1)) - (n + 1) / max(n, 1)
+        # Population correction: G_normalized = G / (1 - 1/n)
+        pop_correction = 1.0 - 1.0 / max(n, 2)
+        gini_np = np.clip(gini_raw / pop_correction, 0.0, 1.0)
+
+        # Normalized entropy: H / log₂(T) ∈ [0, 1]
+        # Decouples entropy from context length T, making it comparable
+        # across different sequence lengths (validation report §10).
+        max_entropy = np.log(max(T_ctx, 2))  # log(T) in nats (matching entr output)
+        normalized_entropy_np = shannon_np / max(max_entropy, 1e-9)
 
         return {
             'shannon_entropy': shannon_np,
+            'normalized_entropy': normalized_entropy_np,
             'renyi_entropy_2': renyi_2_np,
             'max_attention': max_attn_np,
             'effective_rank': eff_rank_np,
@@ -309,8 +324,12 @@ class ChronoscopeInterceptor:
     def _append_head_metrics(self, layer_key: str, metrics: dict):
         """Store per-head metrics in scalar or vector mode."""
         if self.config.head_feature_mode == 'vector':
+            # ── Gap: Normalized Entropy Inclusion ────────────────────────
+            # We explicitly include normalized entropy H/log(T) to ensure
+            # scale-invariance across reasoning steps (validation report §11).
             feature_vector = np.stack([
                 metrics['shannon_entropy'],
+                metrics['normalized_entropy'],
                 metrics['renyi_entropy_2'],
                 metrics['max_attention'],
                 metrics['effective_rank'],
@@ -322,7 +341,7 @@ class ChronoscopeInterceptor:
                 metrics['argmax_pos_norm'],
                 metrics['spread_std'],
                 metrics['gini'],
-            ], axis=1)  # [H, 12]
+            ], axis=1)  # [H, 13]
             self._head_metrics.setdefault(layer_key, []).append(
                 torch.from_numpy(feature_vector).float()
             )
@@ -709,10 +728,29 @@ class ChronoscopeInterceptor:
         return {k: len(v) for k, v in self._head_metrics.items()}
 
     # ------------------------------------------------------------------ #
-    #  Causal Interventions (Patching)
+    #  Backward Compatibility Wrappers for Patching -> Ablation
     # ------------------------------------------------------------------ #
 
-    def patch(
+    def patch(self, *args, **kwargs):
+        """[DEPRECATED] Use capture_with_ablation instead."""
+        warnings.warn("patch is deprecated. Use capture_with_ablation.", DeprecationWarning)
+        return self.capture_with_ablation(*args, **kwargs)
+
+    def patch_attention_heads(self, *args, **kwargs):
+        """[DEPRECATED] Use ablate_attention_heads instead."""
+        warnings.warn("patch_attention_heads is deprecated. Use ablate_attention_heads.", DeprecationWarning)
+        return self.ablate_attention_heads(*args, **kwargs)
+
+    def patch_attention_heads_multi(self, *args, **kwargs):
+        """[DEPRECATED] Use ablate_attention_heads_multi instead."""
+        warnings.warn("patch_attention_heads_multi is deprecated. Use ablate_attention_heads_multi.", DeprecationWarning)
+        return self.ablate_attention_heads_multi(*args, **kwargs)
+
+    # ------------------------------------------------------------------ #
+    #  Sensitivity Analysis (Activation Ablation)
+    # ------------------------------------------------------------------ #
+
+    def capture_with_ablation(
         self,
         prompt: str,
         target_layer_name: str,
@@ -759,7 +797,7 @@ class ChronoscopeInterceptor:
 
         return trajectory, text
 
-    def patch_attention_heads(
+    def ablate_attention_heads(
         self,
         prompt: str,
         target_layer_name: str,
@@ -811,7 +849,7 @@ class ChronoscopeInterceptor:
 
         return trajectory, text
 
-    def patch_attention_heads_multi(
+    def ablate_attention_heads_multi(
         self,
         prompt: str,
         layer_to_heads: Dict[str, List[int]],

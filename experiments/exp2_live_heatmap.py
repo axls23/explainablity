@@ -238,7 +238,7 @@ def main():
 
             # 4. Validity Score
             add_log("Computing validity scores...")
-            validity = analyzer.compute_validity_score(
+            validity = analyzer.compute_fidelity_score(
                 dtw_result=dtw_results,
                 spectral_result=observer_results["spectral"],
                 tda_result=tda_results,

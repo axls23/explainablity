@@ -136,7 +136,14 @@ body::after{content:'';position:fixed;inset:0;background:repeating-linear-gradie
 .spinner{width:12px;height:12px;border:1.5px solid var(--border2);border-top-color:var(--cyan);border-radius:50%;animation:spin 1s linear infinite}
 
 #tt{position:fixed;background:var(--bg2);border:1px solid var(--border2);padding:6px 9px;font-size:8px;border-radius:3px;pointer-events:none;z-index:9999;display:none;color:var(--text0);line-height:1.8;min-width:130px}
-.tt-h{font-size:10px;font-weight:700;color:var(--cyan);margin-bottom:2px}
+  .tt-h{font-size:10px;font-weight:700;color:var(--cyan);margin-bottom:2px}
+  
+  @keyframes dangerPulse {
+    0% { transform: scale(1); box-shadow: 0 0 0 0 rgba(255, 61, 80, 0.2); }
+    50% { transform: scale(1.02); box-shadow: 0 0 6px 1px rgba(255, 61, 80, 0.4); }
+    100% { transform: scale(1); box-shadow: 0 0 0 0 rgba(255, 61, 80, 0.2); }
+  }
+  .dangerPulse { animation: dangerPulse 2s infinite ease-in-out; }
 
 /* Connection banner */
 #conn-banner{position:fixed;bottom:0;left:0;right:0;height:22px;background:rgba(255,179,0,.12);border-top:1px solid rgba(255,179,0,.25);display:flex;align-items:center;justify-content:center;gap:8px;font-size:8px;color:var(--amber);letter-spacing:.1em;z-index:9990;transition:all .3s}
@@ -234,7 +241,7 @@ body::after{content:'';position:fixed;inset:0;background:repeating-linear-gradie
     <div class="si"><div class="si-lbl">ADF Decision (PC0)</div><div class="si-val" id="v-adf" style="color:var(--text2)">–</div><div class="si-sub">per-head joint test (A.1 · A.5)</div></div>
     <div class="si"><div class="si-lbl">Johansen Rank</div><div class="si-val" id="v-coint" style="color:var(--text2)">–</div><div class="si-sub" id="v-coint-i">cointegration check (A.3)</div></div>
     <div class="si"><div class="si-lbl">VAR Lag (AIC)</div><div class="si-val" id="v-lag" style="color:var(--text2)">–</div><div class="si-sub">maxlags=5 · ic=aic (A.4)</div></div>
-    <div class="si"><div class="si-lbl">Perturbation Mode</div><div class="si-val" id="v-pert-mode" style="color:var(--text2);font-size:10px">–</div><div class="si-sub">Gap C.1</div></div>
+    <div class="si"><div class="si-lbl">Ablation Mode</div><div class="si-val" id="v-pert-mode" style="color:var(--text2);font-size:10px">–</div><div class="si-sub">Gap C.1</div></div>
     <div class="si"><div class="si-lbl">CoT Time Axis (D.1)</div><div class="si-val" id="v-cot" style="color:var(--text2);font-size:10px">–</div><div class="si-sub" id="v-cot-steps">–</div></div>
     <div class="si"><div class="si-lbl">Intrinsic Time τ (D.3)</div><div class="si-val" id="v-tau" style="color:var(--purple)">–</div><div class="hbar"><div class="hbar-fill" id="b-tau" style="width:0%;background:var(--purple)"></div></div></div>
     <div class="si"><div class="si-lbl">Phase Clock (D.2 · EC)</div><div id="phase-tl"></div><div class="si-sub" id="v-phase">–</div></div>
@@ -273,9 +280,9 @@ body::after{content:'';position:fixed;inset:0;background:repeating-linear-gradie
     <div style="display:flex;gap:4px;align-items:center;flex-shrink:0;font-size:7px;color:var(--text2)">
       <span id="mat-stats">Awaiting VAR results…</span>
       <span style="margin-left:auto;display:flex;gap:4px;align-items:center">
-        <span style="display:flex;gap:2px;align-items:center"><span style="width:7px;height:7px;display:inline-block;background:var(--bg3);border-radius:1px"></span>insig</span>
-        <span style="display:flex;gap:2px;align-items:center"><span style="width:7px;height:7px;display:inline-block;background:rgba(255,179,0,.5);border-radius:1px"></span>med</span>
-        <span style="display:flex;gap:2px;align-items:center"><span style="width:7px;height:7px;display:inline-block;background:rgba(255,61,80,.8);border-radius:1px"></span>high</span>
+        <span style="display:flex;gap:2px;align-items:center"><span style="width:7px;height:7px;display:inline-block;background:rgba(74,104,136,0.15);border-radius:1px"></span>insig</span>
+        <span style="display:flex;gap:2px;align-items:center"><span style="width:7px;height:7px;display:inline-block;background:hsla(160,100%,55%,0.7);border-radius:10px"></span>sig</span>
+        <span style="display:flex;gap:2px;align-items:center"><span style="width:7px;height:7px;display:inline-block;background:hsla(40,100%,60%,0.9);border-radius:1px;box-shadow:0 0 4px hsla(40,100%,60%,0.3)"></span>high</span>
       </span>
     </div>
     <div id="mat-waiting" class="waiting" style="flex:1"><div class="spinner"></div><div class="waiting-text">VAR not fitted yet</div></div>
@@ -305,10 +312,10 @@ body::after{content:'';position:fixed;inset:0;background:repeating-linear-gradie
       <div class="mr"><div class="mr-name">TE (B.4)</div><div class="mr-bar"><div class="mr-fill" id="mr-te" style="width:0%;background:var(--pink)"></div></div><div class="mr-val" id="mv-te" style="color:var(--text2)">–</div></div>
     </div>
     <div style="width:100%;margin-top:6px;padding-top:5px;border-top:1px solid var(--border)">
-      <div class="si-lbl" style="margin-bottom:3px">Patch Restoration (C.3)</div>
+      <div class="si-lbl" style="margin-bottom:3px">Ablation Restoration (C.3)</div>
       <div style="display:flex;gap:8px;">
         <div style="text-align:center;flex:1"><div style="font-size:14px;font-weight:700;color:var(--text2)" id="vd-restore">–</div><div style="font-size:7px;color:var(--text2)" id="vd-restore-lbl">top pair</div></div>
-        <div style="text-align:center;flex:1"><div style="font-size:14px;font-weight:700;color:var(--text2)" id="vd-kl">–</div><div style="font-size:7px;color:var(--text2)">KL patch</div></div>
+        <div style="text-align:center;flex:1"><div style="font-size:14px;font-weight:700;color:var(--text2)" id="vd-kl">–</div><div style="font-size:7px;color:var(--text2)">KL ablation</div></div>
       </div>
     </div>
   </div>
@@ -324,6 +331,7 @@ body::after{content:'';position:fixed;inset:0;background:repeating-linear-gradie
       <button class="tabbtn"        id="tb-pdc"  onclick="setVarTab('pdc')">B.5·PDC</button>
       <button class="tabbtn"        id="tb-hmm"  onclick="setVarTab('hmm')">D.4·HMM</button>
       <button class="tabbtn"        id="tb-sq"   onclick="setVarTab('sq')">E·SIGNAL</button>
+      <button class="tabbtn"        id="tb-lag"  onclick="setVarTab('lag')">LAG-HORIZON</button>
     </div>
   </div>
   <div class="pc" style="padding:5px 8px;overflow:hidden">
@@ -333,21 +341,46 @@ body::after{content:'';position:fixed;inset:0;background:repeating-linear-gradie
     </div>
     <div id="tab-stat" style="display:none;height:100%;grid-template-columns:1fr 1fr;gap:8px">
       <div style="overflow:hidden" id="stat-list"><div style="font-size:7px;color:var(--text2);letter-spacing:.12em;text-transform:uppercase;margin-bottom:4px">PER-HEAD ADF + KPSS (A.1 · A.5)</div><div style="font-size:7px;color:var(--text2);display:flex;gap:4px;margin-bottom:3px;padding-bottom:2px;border-bottom:1px solid var(--border)"><span style="min-width:20px">H</span><span style="min-width:34px;text-align:right">ADF·p</span><span style="min-width:34px;text-align:right">KPSS·p</span><span style="flex:1"></span><span style="min-width:60px;text-align:right">diagnosis</span></div></div>
-      <div style="overflow:hidden"><div style="font-size:7px;color:var(--text2);letter-spacing:.12em;text-transform:uppercase;margin-bottom:5px">SUMMARY · JOHANSEN (A.3)</div><div id="stat-summary" style="display:grid;grid-template-columns:1fr 1fr;gap:3px;margin-bottom:8px"></div><div style="font-size:7px;color:var(--text2);letter-spacing:.1em;margin-bottom:3px">VECM DECISION</div><div id="vecm-decision" style="font-size:9px;color:var(--text1);line-height:1.7">–</div><div style="margin-top:6px;font-size:7px;color:var(--text2);letter-spacing:.1em;margin-bottom:2px">FRACTIONAL HEADS (→ HURST)</div><div id="frac-heads" style="font-size:9px;color:var(--purple)">–</div></div>
+      <div style="overflow:hidden">
+        <div style="font-size:7px;color:var(--text2);letter-spacing:.12em;text-transform:uppercase;margin-bottom:5px">SUMMARY · JOHANSEN (A.3)</div>
+        <div id="stat-summary" style="display:grid;grid-template-columns:1fr 1fr;gap:3px;margin-bottom:8px"></div>
+        <div style="font-size:7px;color:var(--text2);letter-spacing:.12em;text-transform:uppercase;margin-bottom:5px">REASONING RANK (TOPOLOGICAL)</div>
+        <div id="rank-health" style="margin-bottom:8px;padding:6px;background:rgba(0,212,255,0.05);border:1px solid rgba(0,212,255,0.1);border-radius:2px">
+          <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:4px">
+            <span style="font-size:8px;color:var(--text2)">Effective Rank:</span>
+            <span id="v-rank" style="font-size:14px;font-weight:700;color:var(--cyan)">–</span>
+          </div>
+          <div id="v-rank-status" style="font-size:7px;color:var(--text3);text-align:center;padding:2px;border-radius:2px;transition:all .3s">awaiting rank analysis</div>
+          <div style="margin-top:4px;display:flex;justify-content:space-between;font-size:7px;color:var(--text3)">
+            <span>VN Entropy:</span>
+            <span id="v-rank-entropy">0.000</span>
+          </div>
+        </div>
+        <div style="font-size:7px;color:var(--text2);letter-spacing:.1em;margin-bottom:3px">VECM DECISION</div>
+        <div id="vecm-decision" style="font-size:9px;color:var(--text1);line-height:1.7">–</div>
+        <div style="margin-top:6px;font-size:7px;color:var(--text2);letter-spacing:.1em;margin-bottom:2px">FRACTIONAL HEADS (→ HURST)</div>
+        <div id="frac-heads" style="font-size:9px;color:var(--purple)">–</div>
+      </div>
     </div>
     <div id="tab-pdc" style="display:none;height:100%"><div style="font-size:7px;color:var(--text2);letter-spacing:.12em;margin-bottom:4px">B.5 — PDC · freq-domain Granger · PDC(j→i,f)=|A(f)[i,j]|²/Σₖ|A(f)[k,j]|²</div><div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;height:calc(100% - 20px)"><div><div style="font-size:7px;color:var(--text2);margin-bottom:2px">LOW-FREQ [0, 0.1]</div><div style="position:relative;height:calc(100% - 16px)"><canvas id="c-pdc-low"></canvas></div></div><div><div style="font-size:7px;color:var(--text2);margin-bottom:2px">HIGH-FREQ [0.4, 0.5]</div><div style="position:relative;height:calc(100% - 16px)"><canvas id="c-pdc-high"></canvas></div></div></div></div>
     <div id="tab-hmm" style="display:none;height:100%"><div style="font-size:7px;color:var(--text2);letter-spacing:.12em;margin-bottom:4px">D.4 — HMM PHASE DISCOVERY · n_states=<span id="hmm-n-states">–</span> · Viterbi decode</div><div id="hmm-bar-full" style="display:flex;height:10px;gap:1px;border-radius:2px;overflow:hidden;margin-bottom:6px"></div><div id="hmm-state-info" style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:4px;margin-bottom:6px"></div><div style="font-size:7px;color:var(--text2);margin-bottom:3px">TRANSITION MATRIX</div><div id="hmm-trans" style="display:grid;gap:1px;width:120px;height:60px"></div><div style="margin-top:8px;font-size:7px;color:var(--text2)">BIC: <span id="hmm-bic" style="color:var(--text1)">–</span> · log-likelihood: <span id="hmm-ll" style="color:var(--text1)">–</span></div><div style="position:relative;height:calc(100% - 110px);margin-top:4px"><canvas id="c-hmm"></canvas></div></div>
     <div id="tab-sq" style="display:none;height:100%"><div style="font-size:7px;color:var(--text2);letter-spacing:.12em;margin-bottom:5px">E — MULTI-METRIC SIGNAL QUALITY · E.1 variants · E.2 sink sep · E.3 OV</div><div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;height:calc(100% - 20px)"><div id="sq-per-head" style="overflow:hidden"><div style="font-size:7px;color:var(--text2);margin-bottom:3px">PER-HEAD · current snapshot</div></div><div><div style="font-size:7px;color:var(--text2);margin-bottom:3px">MEAN vs MAX-H</div><div style="position:relative;height:calc(100% - 16px)"><canvas id="c-sq"></canvas></div></div></div></div>
+    <div id="tab-lag" style="display:none;height:100%;overflow:hidden">
+      <div style="font-size:7px;color:var(--text2);letter-spacing:.12em;margin-bottom:4px">VAR FULL LAG-HORIZON (p=5) · rows=target · cols=[lag1_heads... lag5_heads]</div>
+      <div id="lag-scroll" style="width:100%; height:calc(100% - 20px); overflow:auto; position:relative; background:rgba(0,0,0,0.2); border:1px solid var(--border)">
+        <canvas id="c-lag-horizon" style="display:block"></canvas>
+      </div>
+    </div>
   </div>
 </div>
 
 <div class="panel" id="p-perts">
-  <div class="ph"><div class="pt">Perturbation · Gap C</div><div class="pb pb-w" id="pert-badge">IDLE</div></div>
+  <div class="ph"><div class="pt">Ablation · Gap C</div><div class="pb pb-w" id="pert-badge">IDLE</div></div>
   <div class="pc" style="padding:6px 8px;overflow-y:auto">
     <div style="font-size:7px;color:var(--text2);letter-spacing:.1em;text-transform:uppercase;margin-bottom:4px">C.1/C.2 · ablation results</div>
     <div style="font-size:7px;color:var(--text2);display:flex;gap:4px;margin-bottom:2px"><span style="min-width:26px">head</span><span style="min-width:28px">mode</span><span style="flex:1">ΔH entropy</span><span style="min-width:36px;text-align:right">restore</span></div>
-    <div id="pert-list"><div class="waiting" style="height:50px"><div class="spinner"></div><div class="waiting-text">No perturbation data</div></div></div>
-    <div style="margin-top:8px;font-size:7px;color:var(--text2);letter-spacing:.1em;text-transform:uppercase;margin-bottom:4px">C.3 · activation patching</div>
+    <div id="pert-list"><div class="waiting" style="height:50px"><div class="spinner"></div><div class="waiting-text">No Ablation data</div></div></div>
+    <div style="margin-top:8px;font-size:7px;color:var(--text2);letter-spacing:.1em;text-transform:uppercase;margin-bottom:4px">C.3 · activation ablation</div>
     <div id="patch-list"><div style="font-size:8px;color:var(--text3)">–</div></div>
     <div style="margin-top:8px;font-size:7px;color:var(--text2);letter-spacing:.1em;text-transform:uppercase;margin-bottom:3px">C.4 · direct vs mediated</div>
     <div id="mediation-list"><div style="font-size:8px;color:var(--text3)">–</div></div>
@@ -424,7 +457,7 @@ body::after{content:'';position:fixed;inset:0;background:repeating-linear-gradie
 //    feat_mode:    string,       // 'scalar' | 'vector'
 //    head_metric:  string,       // 'shannon_entropy' | 'renyi_entropy_2' | ...
 //    sink_removed: boolean,      // whether BOS sink was removed
-//    pert_mode:    string,       // 'zero' | 'mean' | 'gaussian'
+//    ablation_mode:    string,       // 'zero' | 'mean' | 'gaussian'
 //
 //    // ── Gap A — Stationarity ─────────────────────────────────────────────
 //    hurst:        number,       // Hurst exponent of PC0 trajectory
@@ -453,9 +486,9 @@ body::after{content:'';position:fixed;inset:0;background:repeating-linear-gradie
 //    pdc_low:  number[]|null,   // [n_heads] PDC integrated over [0, 0.1]
 //    pdc_high: number[]|null,   // [n_heads] PDC integrated over [0.4, 0.5]
 //
-//    // ── Gap C — Perturbation results (emitted per ablation run) ───────────
-//    perturbation_results: [
-//      { head, target, mode, delta_entropy, restoration, kl_patch, confirmed }
+//    // ── Gap C — Ablation results (emitted per ablation run) ───────────
+//    Ablation_results: [
+//      { head, target, mode, delta_entropy, restoration, kl_ablation, confirmed }
 //    ]|null,
 //    mediation_results: [
 //      { source, target, mediator, total_effect, direct_effect, indirect_effect, ratio }
@@ -489,8 +522,8 @@ body::after{content:'';position:fixed;inset:0;background:repeating-linear-gradie
 //      { h, shannon, renyi, effrank, sink, maxattn, ov_norm }
 //    ]|null,
 //
-//    // ── Composite score (emitted after VAR + perturbation complete) ─────────
-//    composite_score:   number|null,   // 0–100
+//    // ── Composite score (emitted after VAR + Ablation complete) ─────────
+//    fidelity_score:   number|null,   // 0–100
 //    dtw_sensitivity:   number|null,
 //    spectral_coherence: number|null,
 //    topo_smoothness:   number|null,
@@ -533,7 +566,7 @@ body::after{content:'';position:fixed;inset:0;background:repeating-linear-gradie
 
 // ── CONFIG ──────────────────────────────────────────────────────────────────
 const CFG = {
-  WS_URLS:       ['ws://localhost:8765'],
+  WS_URLS:       ['ws://localhost:8765', 'ws://localhost:8767', 'ws://localhost:8769'],
   CHAT_API_URL:  'http://127.0.0.1:8000/chat',
   POLL_PATH:     '/tmp/chronoscope_frame.json',  // file poll fallback
   POLL_INTERVAL: 300,                     // ms between file polls
@@ -769,7 +802,7 @@ function processFrame(f) {
   if(f.adf_pval_pc0 != null)    updateADF(f.adf_pval_pc0);
   if(f.coint_rank != null)      updateCoint(f.coint_rank, f.vecm_used);
   if(f.tau != null)             updateTau(f.tau);
-  if(f.pert_mode)               document.getElementById('v-pert-mode').textContent = f.pert_mode;
+  if(f.ablation_mode)               document.getElementById('v-pert-mode').textContent = f.ablation_mode;
   if(f.cot_time_axis){
     document.getElementById('v-cot').textContent = f.cot_time_axis;
     document.getElementById('v-cot').style.color = f.cot_time_axis.includes('step') ? 'var(--green)' : 'var(--text1)';
@@ -786,6 +819,7 @@ function processFrame(f) {
 
   // ── Gap A — Per-head stationarity ─────────────────────────────────────
   if(f.stat_per_head) renderStationarity(f.stat_per_head, f.coint_rank, f.vecm_used);
+  if(f.topological_rank) renderRankHealth(f.topological_rank);
 
   // ── Gap A — Entropy stream ────────────────────────────────────────────
   if(f.entropy_row) updateEntropyChart(f.token_idx, f.entropy_row, f.head_metric);
@@ -793,11 +827,13 @@ function processFrame(f) {
   // ── Gap B — VAR influence matrix ──────────────────────────────────────
   if(f.influence_matrix && f.fdr_reject)
     renderMatrix(f.influence_matrix, f.fdr_reject, f.pval_matrix, f.significant_pairs);
+  if(f.lag_horizon_matrix)
+    renderLagHorizon(f.lag_horizon_matrix, f.n_lags);
   if(f.significant_pairs) renderInfluenceList(f.significant_pairs);
   if(f.pdc_low)  updatePDCChart(f.pdc_low, f.pdc_high);
 
-  // ── Gap C — Perturbation ──────────────────────────────────────────────
-  if(f.perturbation_results) renderPerturbation(f.perturbation_results, f.mediation_results);
+  // ── Gap C — Ablation ──────────────────────────────────────────────
+  if(f.Ablation_results) renderAblation(f.Ablation_results, f.mediation_results);
 
   // ── Gap D — HMM + phases ──────────────────────────────────────────────
   if(f.hmm_states && f.hmm_states.length > 0){
@@ -818,7 +854,7 @@ function processFrame(f) {
   if(f.signal_quality) renderSignalQuality(f.signal_quality);
 
   // ── Composite score ───────────────────────────────────────────────────
-  if(f.composite_score != null) updateScore(f);
+  if(f.fidelity_score != null) updateScore(f);
 
   // ── Log events ────────────────────────────────────────────────────────
   if(f.log_events){
@@ -833,8 +869,8 @@ function processFrame(f) {
   if(f.entropy_row)          setBadge('pb-entropy', 'STREAMING',   'pb-g');
   if(f.influence_matrix)   { setBadge('mat-badge',  'FDR·MASKED',  'pb-c');
                              setBadge('pb-var',     'BH-FDR α=0.05','pb-c'); }
-  if(f.composite_score!=null)setBadge('vd-badge',   'LIVE',        'pb-g');
-  if(f.perturbation_results) setBadge('pert-badge', f.pert_mode?.toUpperCase()||'ACTIVE', 'pb-p');
+  if(f.fidelity_score!=null)setBadge('vd-badge',   'LIVE',        'pb-g');
+  if(f.Ablation_results) setBadge('pert-badge', f.ablation_mode?.toUpperCase()||'ACTIVE', 'pb-p');
   if(f.betti0 != null)      setBadge('tda-badge',  'LIVE',        'pb-g');
 
   // Update dots — sticky
@@ -932,10 +968,21 @@ function redrawEntropyChartForMetric(metricKey){
     ds.data = hist[i] || [];
   });
 
-  const yMaxByMetric = {shannon:5, renyi:12, effrank:1, sink:2, maxattn:1};
-  const yMax = yMaxByMetric[metricKey] || 5;
+  // Find local max for dynamic scaling if static is too restrictive
+  let localMax = 0;
+  for(let k in hist){
+    const m = Math.max(...hist[k]);
+    if(m > localMax) localMax = m;
+  }
+
+  const yMaxByMetric = {shannon: Math.max(localMax * 1.1, 2.0), renyi:12, effrank:1.1, sink:1.1, maxattn:1.1};
+  let yMax = yMaxByMetric[metricKey] || 5;
+  
+  // For entropy/maxattn we usually want at least some visibility
+  if(metricKey === 'shannon') yMax = Math.max(yMax, 2.0);
+
   charts.entropy.options.scales.y.max = yMax;
-  charts.entropy.options.scales.y.stepSize = yMax <= 1 ? 0.2 : 1;
+  charts.entropy.options.scales.y.stepSize = yMax <= 1.5 ? 0.2 : 1;
   charts.entropy.update('none');
 }
 
@@ -965,53 +1012,112 @@ function updateEntropyChart(tokenIdx, row, headMetric){
 
 function renderMatrix(infMat, fdrReject, pvalMat, sigPairs){
   const g = document.getElementById('mat-grid');
+  if(!infMat) return;
   g.innerHTML = '';
   const H = infMat.length;
   g.style.gridTemplateColumns = `repeat(${H},1fr)`;
   g.style.gridTemplateRows    = `repeat(${H},1fr)`;
+  g.style.gap = H > 24 ? '0px' : '1px'; // define boxes better for smaller grids
   const tt = document.getElementById('tt');
   let sigCount = 0;
+  
+  // Dynamic Normalization: use current max to ensure contrast in low-influence frames
+  let maxV = 0.001;
+  for(let i=0; i<H; i++) for(let j=0; j<H; j++) if(infMat[i][j] > maxV) maxV = infMat[i][j];
+
   const asBool = (v) => (v === true || v === 1 || v === '1' || v === 'true');
+  
   for(let i=0; i<H; i++){
     for(let j=0; j<H; j++){
-      const v    = infMat[i][j];
+      const v     = infMat[i][j];
       const isSig = asBool(fdrReject?.[i]?.[j]);
       const pval  = pvalMat?.[i]?.[j];
       if(isSig) sigCount++;
+      
       const c = document.createElement('div');
       c.className = 'mc';
-      if(i===j){ c.style.background = 'var(--bg0)'; }
+      
+      const norm = Math.min(v / maxV, 1);
+      
+      if(i===j){
+        // Diagonal: self-influence (often filtered out but can be meaningful)
+        c.style.background = 'rgba(255,255,255,0.03)';
+      }
       else if(!isSig){
-        // Strict FDR masking: non-significant pairs render as low-contrast background.
-        c.style.background = 'rgba(28,45,62,0.08)';
+        // Category 1: Insignificant (based on legend at line 283)
+        c.style.background = `rgba(74, 104, 136, ${0.05 + norm * 0.1})`;
+        c.style.borderRadius = '1px';
       }
       else {
-        const n = Math.min(v/1.5, 1);
-        c.style.background = v>1
-          ? `rgba(255,61,80,${.15+n*.85})`
-          : v>.75 ? `rgba(255,179,0,${.15+n*.75})`
-                  : `rgba(0,212,255,${.12+n*.65})`;
+        // Category 2 & 3: Significant vs High
+        if(norm > 0.7){
+          // Category 3: High (Amber, line 285)
+          c.style.background = `hsla(40, 100%, 60%, 0.9)`;
+          c.style.boxShadow  = `0 0 6px hsla(40, 100%, 60%, 0.4)`;
+          c.style.borderRadius = '1px';
+        } else {
+          // Category 2: Significant (Greenish, line 284)
+          c.style.background = `hsla(160, 100%, 55%, 0.7)`;
+          c.style.borderRadius = '10px'; // Rounded like the legend
+        }
       }
+      
       c.addEventListener('mousemove', e => {
         tt.style.display='block';
         tt.style.left=`${e.clientX+12}px`;
         tt.style.top=`${e.clientY-8}px`;
-        tt.innerHTML=`<div class="tt-h">H${j} → H${i}</div>Score: ${v.toFixed(3)}<br>`
-          +(isSig
-            ? `<span style="color:var(--green)">FDR-sig · p=${pval!=null?pval.toFixed(4):'–'}</span>`
-            : `<span style="color:var(--text2)">not significant after BH-FDR</span>`);
+        tt.innerHTML=`<div class="tt-h">H${j} (src) → H${i} (target)</div>Influence: ${v.toFixed(4)}<br>`
+          + (isSig
+            ? `<span style="color:var(--green)">FDR-sig · p=${pval!=null?pval.toFixed(5):'–'}</span>`
+            : `<span style="color:var(--text3)">statistically non-significant</span>`);
       });
       c.addEventListener('mouseleave', () => tt.style.display='none');
       g.appendChild(c);
     }
   }
+  
   const total = H*(H-1);
-  document.getElementById('mat-stats').textContent =
-    `${sigCount} FDR-sig pairs · ${total} tested`;
+  document.getElementById('mat-stats').textContent = `${sigCount} FDR-sig pairs · ${total} tested`;
   const topPair = sigPairs?.[0];
   document.getElementById('mat-cap').textContent = topPair
-    ? `top: H${topPair.source}→H${topPair.target} (${topPair.score?.toFixed(3)}) · VECM=${document.getElementById('v-coint').textContent}`
-    : '';
+    ? `max: H${topPair.source}→H${topPair.target} (${topPair.score?.toFixed(3)}) · normalized to max=${maxV.toFixed(2)}`
+    : `max_infl: ${maxV.toFixed(3)}`;
+}
+
+function renderLagHorizon(matrix, nLags){
+  const canvas = document.getElementById('c-lag-horizon');
+  if(!matrix || !canvas) return;
+  const ctx = canvas.getContext('2d');
+  const H = matrix.length;
+  if(H === 0) return;
+  const head0 = matrix[0] || [];
+  const TotalCols = head0.length;
+  if(TotalCols === 0) return;
+  const cellSize = H > 32 ? 10 : 16;
+  
+  canvas.width = TotalCols * cellSize;
+  canvas.height = H * cellSize;
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  
+  for(let i=0; i<H; i++){
+    for(let j=0; j<TotalCols; j++){
+      const v = matrix[i][j];
+      const absV = Math.abs(v);
+      const norm = Math.min(absV / 1.0, 1.0); 
+      
+      if(absV < 0.05){
+        // Category 1: Insignificant
+        ctx.fillStyle = `rgba(74, 104, 136, ${0.05 + absV})`;
+      } else if(absV > 0.7){
+        // Category 3: High (Amber)
+        ctx.fillStyle = `hsla(40, 100%, 60%, 0.9)`;
+      } else {
+        // Category 2: Significant (Greenish)
+        ctx.fillStyle = `hsla(160, 100%, 55%, 0.7)`;
+      }
+      ctx.fillRect(j * cellSize, i * cellSize, cellSize-1, cellSize-1);
+    }
+  }
 }
 
 function renderInfluenceList(sigPairs){
@@ -1028,10 +1134,22 @@ function renderInfluenceList(sigPairs){
   sigPairs.slice(0,9).forEach(p=>{
     const r = document.createElement('div');
     r.className = 'il-row';
-    const col = p.score > 1 ? '#ff3d50' : p.score > .75 ? '#ffb300' : '#00d4ff';
-    r.innerHTML=`<div class="il-pair" style="color:${col}">H${p.source}→H${p.target}</div>`
-      +`<div class="il-bar"><div class="il-fill" style="width:${(p.score/max)*100}%;background:${col}"></div></div>`
-      +`<div class="il-score">${(p.score??0).toFixed(3)}</div>`
+    const norm = Math.min((p.score || 0) / (max || 1.0), 1);
+    
+    // Categorical Consistency: Use same 3-category logic
+    let barCol = 'rgba(74, 104, 136, 0.5)';
+    let textCol = 'var(--text2)';
+    if(p.score > 0.7) {
+       barCol = 'hsla(40, 100%, 60%, 0.9)'; // High
+       textCol = 'hsla(40, 100%, 75%, 1)';
+    } else if(p.score > 0.05 || p.fdr_sig) {
+       barCol = 'hsla(160, 100%, 55%, 0.7)'; // Significant
+       textCol = 'hsla(160, 100%, 75%, 1)';
+    }
+    
+    r.innerHTML=`<div class="il-pair" style="color:${textCol}">H${p.source}→H${p.target}</div>`
+      +`<div class="il-bar"><div class="il-fill" style="width:${norm*100}%;background:${barCol};box-shadow:0 0 4px ${barCol}"></div></div>`
+      +`<div class="il-score" style="color:var(--text0)">${(p.score??0).toFixed(3)}</div>`
       +`<div class="il-sig ${p.fdr_sig?'sig-y':'sig-n'}">${p.fdr_sig?`p=${(p.pval??0).toFixed(3)}`:'n/s'}</div>`;
     el.appendChild(r);
   });
@@ -1062,7 +1180,7 @@ function updatePDCChart(pdcLow, pdcHigh){
 function renderStationarity(perHead, cointRank, vecmUsed){
   const el = document.getElementById('stat-list');
   while(el.children.length > 2) el.removeChild(el.lastChild);
-  const diagCols = {stationary:'#00ff88',unit_root:'#ffb300',fractional:'#aa66ff',ambiguous:'#4a6888'};
+  const diagCols = {stationary:'#00ff88',unit_root:'#ffb300',structural_change:'#aa66ff',ambiguous:'#4a6888'};
   perHead.forEach(s=>{
     const r = document.createElement('div');
     r.className = 'stat-row';
@@ -1083,18 +1201,25 @@ function renderStationarity(perHead, cointRank, vecmUsed){
       <div style="font-size:16px;font-weight:700;color:${diagCols2[d]}">${c}</div>
       <div style="font-size:6px;color:var(--text2);letter-spacing:.07em">${d}</div>
     </div>`).join('');
-  const fracHeads = perHead.filter(s=>s.diagnosis==='fractional').map(s=>`H${s.h}`).join(', ');
-  document.getElementById('frac-heads').textContent = fracHeads || 'none';
+  const structHeads = perHead.filter(s=>s.diagnosis==='structural_change').map(s=>`H${s.h}`).join(', ');
+  document.getElementById('frac-heads').textContent = structHeads || 'none';
 }
 
-function renderPerturbation(pertResults, mediationResults){
+function renderAblation(pertResults, mediationResults){
   document.getElementById('pert-list').innerHTML = pertResults.map(p=>{
     const modeCol  = p.mode==='zero' ? 'var(--teal)' : 'var(--amber)';
     const restoreCol = p.restoration>.7?'#00ff88':p.restoration>.4?'#ffb300':'#ff3d50';
+    
+    // Perceptual consistency: Use the same HSL logic as variables in the VAR matrix
+    const absNorm = Math.min(Math.abs(p.delta_entropy) / 0.6, 1); 
+    const hue = 200 - (absNorm * 160);
+    const lit = 45 + (absNorm * 25);
+    const barCol = `hsla(${hue}, 100%, ${lit}%, 0.8)`;
+    
     return `<div class="pert-row">`
       +`<div style="min-width:26px;font-size:8px;color:var(--cyan)">H${p.head}</div>`
       +`<div style="font-size:7px;padding:1px 4px;border-radius:1px;min-width:28px;background:rgba(0,255,204,.08);color:${modeCol};border:1px solid rgba(0,255,204,.2)">${p.mode}</div>`
-      +`<div class="pert-bar"><div class="pert-fill" style="width:${Math.min(Math.abs(p.delta_entropy)/0.5*100,100)}%;background:${p.confirmed?'#00ff88':'#ffb300'}"></div></div>`
+      +`<div class="pert-bar"><div class="pert-fill" style="width:${Math.min(Math.abs(p.delta_entropy)/0.6*100,100)}%;background:${barCol};box-shadow: 0 0 5px ${barCol}"></div></div>`
       +`<div style="min-width:36px;text-align:right;color:${p.delta_entropy>0?'#ff3d50':'#00ff88'};font-size:8px">${p.delta_entropy>0?'+':''}${p.delta_entropy.toFixed(3)}</div>`
       +`<div style="min-width:32px;text-align:right;font-size:7px;color:${restoreCol}">${(p.restoration*100).toFixed(0)}%</div>`
       +`</div>`;
@@ -1104,7 +1229,7 @@ function renderPerturbation(pertResults, mediationResults){
     `<div class="pert-row">`
     +`<div style="min-width:50px;font-size:8px;color:var(--cyan)">H${p.head}→H${p.target}</div>`
     +`<div style="flex:1;font-size:7px;color:var(--text1)">restore=<span style="color:${p.restoration>.7?'#00ff88':p.restoration>.4?'#ffb300':'#ff3d50'}">${(p.restoration*100).toFixed(0)}%</span></div>`
-    +`<div style="min-width:50px;font-size:7px;color:var(--text2)">kl=${(p.kl_patch??0).toFixed(3)}</div>`
+    +`<div style="min-width:50px;font-size:7px;color:var(--text2)">kl=${(p.kl_ablation??0).toFixed(3)}</div>`
     +`</div>`
   ).join('');
 
@@ -1114,7 +1239,7 @@ function renderPerturbation(pertResults, mediationResults){
     document.getElementById('vd-restore').textContent     = `${(top.restoration*100).toFixed(0)}%`;
     document.getElementById('vd-restore').style.color     = top.restoration>.7?'#00ff88':top.restoration>.4?'#ffb300':'#ff3d50';
     document.getElementById('vd-restore-lbl').textContent = `H${top.head}→H${top.target}`;
-    document.getElementById('vd-kl').textContent          = (top.kl_patch??0).toFixed(3);
+    document.getElementById('vd-kl').textContent          = (top.kl_ablation??0).toFixed(3);
     document.getElementById('vd-kl').style.color          = 'var(--amber)';
   }
 
@@ -1275,6 +1400,34 @@ function renderTopoAnomalies(anomalies){
   }).join('');
 }
 
+function renderRankHealth(rankInfo){
+  const vRank = document.getElementById('v-rank');
+  const vStatus = document.getElementById('v-rank-status');
+  const vEntropy = document.getElementById('v-rank-entropy');
+  if(!vRank || !vStatus || !vEntropy) return;
+
+  const r = rankInfo.effective_rank;
+  const e = rankInfo.rank_entropy;
+  const coll = rankInfo.rank_collapse;
+
+  vRank.textContent = r;
+  vEntropy.textContent = e.toFixed(3);
+  
+  if(coll){
+    vStatus.textContent = '⚠ ATTENTION RANK COLLAPSE';
+    vStatus.style.background = 'rgba(255,61,80,0.15)';
+    vStatus.style.color = '#ff3d50';//var(--red)
+    vStatus.style.border = '1px solid rgba(255,61,80,0.3)';
+    vStatus.classList.add('dangerPulse');
+  } else {
+    vStatus.textContent = '✓ MULTIFACETED REASONING';
+    vStatus.style.background = 'rgba(0,255,136,0.1)';
+    vStatus.style.color = '#00ff88';//var(--green)
+    vStatus.style.border = '1px solid rgba(0,255,136,0.2)';
+    vStatus.classList.remove('dangerPulse');
+  }
+}
+
 function renderSignalQuality(sqData){
   const el = document.getElementById('sq-per-head');
   while(el.children.length>1) el.removeChild(el.lastChild);
@@ -1305,7 +1458,7 @@ function renderSignalQuality(sqData){
 }
 
 function updateScore(f){
-  const score = f.composite_score ?? 0;
+  const score = f.fidelity_score ?? 0;
   const arc   = document.getElementById('ring-arc');
   const circ  = 213.6;
   arc.setAttribute('stroke-dashoffset', circ-(circ*score/100));
@@ -1460,7 +1613,7 @@ function initChatIsland(){
 // ── TAB SWITCHING ─────────────────────────────────────────────────────────────
 function setVarTab(tab){
   RT.varTab=tab;
-  ['inf','stat','pdc','hmm','sq'].forEach(t=>{
+  ['inf','stat','pdc','hmm','sq','lag'].forEach(t=>{
     const tabEl=document.getElementById(`tab-${t}`);
     const btn=document.getElementById(`tb-${t}`);
     if(!tabEl||!btn)return;
@@ -1600,7 +1753,7 @@ const GUIDE_SECTIONS=[
   <div class="hpipe-arrow">↓</div>
   <div class="hpipe-step" style="border-color:var(--purple)"><div class="hpipe-n" style="color:var(--purple)">4</div><div><strong>VAR(p) fitted</strong> with AIC lag selection. Granger F-tests on 196 pairs. BH-FDR correction α=0.05 (Gap B)</div></div>
   <div class="hpipe-arrow">↓</div>
-  <div class="hpipe-step" style="border-color:var(--teal)"><div class="hpipe-n" style="color:var(--teal)">5</div><div><strong>Perturbation confirms</strong> causal links via zero-ablation, activation patching, mediation decomposition (Gap C)</div></div>
+  <div class="hpipe-step" style="border-color:var(--teal)"><div class="hpipe-n" style="color:var(--teal)">5</div><div><strong>Ablation confirms</strong> causal links via zero-ablation, activation ablation, mediation decomposition (Gap C)</div></div>
   <div class="hpipe-arrow">↓</div>
   <div class="hpipe-step" style="border-color:var(--pink)"><div class="hpipe-n" style="color:var(--pink)">6</div><div><strong>Composite score</strong> — DTW + spectral + topological + active reasoning + FDR pairs → STRONG/MODERATE/HALLUCINATION verdict</div></div>
 </div>`
@@ -1612,7 +1765,7 @@ const GUIDE_SECTIONS=[
 <p style="color:var(--text1);margin-bottom:12px">The dashboard is a <span class="hl-g">3-row × 4-column grid</span>. Each panel streams live data from the pipeline. Here is what each panel is and why it exists.</p>
 <div class="hsection">Panel Map</div>
 <div style="display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:5px;margin-bottom:12px">
-  <div class="hpanel-card" style="border-color:rgba(0,212,255,.3)"><div class="hpanel-name" style="color:var(--cyan)">Model State [col 1, row 1]</div><div class="hpanel-desc">Scalar health metrics: Hurst exponent, ADF result, Johansen rank, VAR lag, perturbation mode, CoT axis, intrinsic time τ, HMM phase clock.</div></div>
+  <div class="hpanel-card" style="border-color:rgba(0,212,255,.3)"><div class="hpanel-name" style="color:var(--cyan)">Model State [col 1, row 1]</div><div class="hpanel-desc">Scalar health metrics: Hurst exponent, ADF result, Johansen rank, VAR lag, Ablation mode, CoT axis, intrinsic time τ, HMM phase clock.</div></div>
   <div class="hpanel-card" style="border-color:rgba(0,255,136,.3)"><div class="hpanel-name" style="color:var(--green)">Head Entropy [col 2, row 1]</div><div class="hpanel-desc">Live streaming chart of all 14 head signals. Five metric tabs: Shannon, Rényi, effective rank, sink fraction, max-attention.</div></div>
   <div class="hpanel-card" style="border-color:rgba(255,179,0,.3)"><div class="hpanel-name" style="color:var(--amber)">Influence Matrix [col 3, row 1]</div><div class="hpanel-desc">14×14 heatmap of directed head influence. Row i = target, col j = source. Only FDR-significant cells are coloured.</div></div>
   <div class="hpanel-card" style="border-color:rgba(170,102,255,.3)"><div class="hpanel-name" style="color:var(--purple)">Composite Score [col 4, row 1]</div><div class="hpanel-desc">Reasoning verdict as animated ring (0–100). Sub-metric bars for all components.</div></div>
@@ -1624,7 +1777,7 @@ const GUIDE_SECTIONS=[
   <div class="htr"><div class="htd-k" style="color:var(--amber)">● AMBER</div><div class="htd-v">Warning / non-stationary / unit root / moderate influence</div></div>
   <div class="htr"><div class="htd-k" style="color:var(--red)">● RED</div><div class="htd-v">High influence (>1.0) / EC spike / hallucination risk</div></div>
   <div class="htr"><div class="htd-k" style="color:var(--purple)">● PURPLE</div><div class="htd-v">Fractional integration / TDA / HMM / topological metrics</div></div>
-  <div class="htr"><div class="htd-k" style="color:var(--teal)">● TEAL</div><div class="htd-v">Perturbation / zero-ablation / FDR pair count / arc-length τ</div></div>
+  <div class="htr"><div class="htd-k" style="color:var(--teal)">● TEAL</div><div class="htd-v">Ablation / zero-ablation / FDR pair count / arc-length τ</div></div>
 </div>`
   },
   {
@@ -1672,10 +1825,10 @@ const GUIDE_SECTIONS=[
 </div>`
   },
   {
-    id:'gapC', label:'Gap C · Perturbation', color:'var(--teal)',
-    title:'Gap C — Perturbation & intervention design',
+    id:'gapC', label:'Gap C · Ablation', color:'var(--teal)',
+    title:'Gap C — Ablation & intervention design',
     content:`
-<p style="color:var(--text1);margin-bottom:12px">The original code used Gaussian noise ablation — injecting random energy rather than cleanly removing a head. Gap C introduces three rigorous interventions. <strong>Find this in: the Perturbation panel.</strong></p>
+<p style="color:var(--text1);margin-bottom:12px">The original code used Gaussian noise ablation — injecting random energy rather than cleanly removing a head. Gap C introduces three rigorous interventions. <strong>Find this in: the Ablation panel.</strong></p>
 <div class="hsection">C.1 — Zero-ablation (default)</div>
 <div class="htable">
   <div class="htr"><div class="htd-k">Operation</div><div class="htd-v"><code style="background:var(--bg3);padding:1px 5px;border-radius:2px;color:var(--teal)">hidden[:,:,start:end] = 0.0</code> — removes head, no energy injected</div></div>
@@ -1683,7 +1836,7 @@ const GUIDE_SECTIONS=[
 </div>
 <div class="hsection">C.2 — Mean ablation</div>
 <p style="margin-bottom:8px">Replace head output with mean activation from reference prompts — makes head "generic" rather than absent. Stays within model's training distribution.</p>
-<div class="hsection">C.3 — Activation patching</div>
+<div class="hsection">C.3 — activation ablation</div>
 <div class="htable">
   <div class="htr"><div class="htd-k">Method</div><div class="htd-v">Run clean + corrupted prompts. Patch clean head activations into corrupted run. Measure how much output shifts back toward clean.</div></div>
   <div class="htr"><div class="htd-k" style="color:var(--green)">restore → 0.84</div><div class="htd-v">84% of clean-corrupted gap closed. Very strong causal confirmation.</div></div>
@@ -1783,7 +1936,7 @@ const GUIDE_SECTIONS=[
 </div>
 <div class="hsection">Verdict thresholds</div>
 <div class="htable">
-  <div class="htr" style="background:rgba(0,255,136,.05)"><div class="htd-k" style="color:var(--green)">70–100 STRONG REASONING</div><div class="htd-v">All signals coherent. Logical chains confirmed by perturbation. Trust the output.</div></div>
+  <div class="htr" style="background:rgba(0,255,136,.05)"><div class="htd-k" style="color:var(--green)">70–100 STRONG REASONING</div><div class="htd-v">All signals coherent. Logical chains confirmed by Ablation. Trust the output.</div></div>
   <div class="htr" style="background:rgba(255,179,0,.05)"><div class="htd-k" style="color:var(--amber)">50–69 MODERATE REASONING</div><div class="htd-v">Mixed signals. Some heads active, others drifting. Partial reliability.</div></div>
   <div class="htr" style="background:rgba(255,61,80,.05)"><div class="htd-k" style="color:var(--red)">0–49 HALLUCINATION RISK</div><div class="htd-v">Random walk, fragmenting topology, low spectral coherence. High confabulation probability.</div></div>
 </div>`

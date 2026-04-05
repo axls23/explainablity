@@ -210,7 +210,7 @@ class DashboardBridge:
             "head_metric": getattr(config, "head_metric_type", "shannon_entropy"),
             "feat_mode": getattr(config, "head_feature_mode", "scalar"),
             "sink_removed": getattr(config, "remove_attention_sink", True),
-            "pert_mode": getattr(config, "perturbation_mode", "zero"),
+            "ablation_mode": getattr(config, "ablation_mode", getattr(config, "perturbation_mode", "zero")),
             "token_idx": int(token_idx),
             "entropy_row": entropy_row,
             "hurst": _safe_float(getattr(observer, "hurst_exponent", None)),
@@ -301,6 +301,7 @@ class DashboardBridge:
             ),
             "pdc_low": pdc_low,
             "pdc_high": pdc_high,
+            "topological_rank": head_result.get("topological_rank"),
         }
         return frame
 
@@ -355,32 +356,37 @@ class DashboardBridge:
             "significant_pairs": sig_pairs_list,
             "pdc_low": aggregated.get("pdc_low"),
             "pdc_high": aggregated.get("pdc_high"),
+            "topological_rank": aggregated.get("topological_rank"),
         }
         return frame
 
-    def push_perturbation_frame(self, pert_results: list[dict], mediation_results: list[dict] | None = None):
+    def push_ablation_frame(self, ablation_results: list[dict], mediation_results: list[dict] | None = None):
         frame = {
-            "perturbation_results": [
+            "ablation_results": [
                 {
                     "head": int(p.get("head", -1)),
                     "target": int(p.get("target", -1)),
                     "mode": str(p.get("mode", "zero")),
                     "delta_entropy": float(p.get("delta_entropy", 0.0)),
                     "restoration": float(p.get("restoration", 0.0)),
-                    "kl_patch": float(p.get("kl_patch", 0.0)),
+                    "kl_ablation": float(p.get("kl_ablation", p.get("kl_patch", 0.0))),
                     "confirmed": bool(p.get("confirmed", False)),
                 }
-                for p in (pert_results or [])
+                for p in (ablation_results or [])
             ],
             "mediation_results": mediation_results if mediation_results else None,
             "log_events": [
                 {
                     "type": "pert",
-                    "msg": f"C.1/C.2: {len(pert_results or [])} ablation results received",
+                    "msg": f"C.1/C.2: {len(ablation_results or [])} activation ablation results received",
                 }
             ],
         }
         self._send(frame)
+
+    def push_perturbation_frame(self, *args, **kwargs):
+        """Deprecated alias for push_ablation_frame."""
+        return self.push_ablation_frame(*args, **kwargs)
 
     def push_hmm_frame(self, hmm_result: dict, config):
         if not hmm_result:
@@ -550,7 +556,7 @@ class DashboardBridge:
 
     def push_score_frame(self, composite: dict, interpretation: dict | None = None):
         frame = {
-            "composite_score": round(float(composite.get("score", 0))),
+            "fidelity_score": round(float(composite.get("score", 0))),
             "dtw_sensitivity": _safe_float(composite.get("dtw_sensitivity")),
             "spectral_coherence": _safe_float(composite.get("spectral_coherence")),
             "topo_smoothness": _safe_float(composite.get("topo_smoothness")),
@@ -560,7 +566,7 @@ class DashboardBridge:
             "log_events": [
                 {
                     "type": "ok",
-                    "msg": f"Composite score: {round(float(composite.get('score', 0)))} -> {composite.get('verdict', '-')}",
+                    "msg": f"Fidelity score: {round(float(composite.get('score', 0)))} -> {composite.get('verdict', '-')}",
                 }
             ],
         }
@@ -642,13 +648,29 @@ class DashboardBridge:
                 self._ws_clients.discard(ws)
 
         async def _server():
-            async with websockets.serve(_handler, self.ws_host, self.ws_port) as server:
-                self._ws_server = server
-                # Wait for stop event instead of infinite Future
-                await self._stop_event.wait()
-                # Close server gracefully
-                server.close()
-                await server.wait_closed()
+            import socket
+            backoff_ports = [self.ws_port, self.ws_port + 2, self.ws_port + 4]
+            bound_port = None
+            
+            for port in backoff_ports:
+                try:
+                    async with websockets.serve(_handler, self.ws_host, port) as server:
+                        self.ws_port = port
+                        bound_port = port
+                        self._ws_server = server
+                        # Wait for stop event instead of infinite Future
+                        await self._stop_event.wait()
+                        # Close server gracefully
+                        server.close()
+                        await server.wait_closed()
+                        break
+                except OSError as e:
+                    if e.errno == 98 or e.errno == 10048: # Address already in use
+                        continue
+                    raise e
+            
+            if not bound_port:
+                print(f"[!] Could not bind WebSocket server to any port in {backoff_ports}")
 
         def _run():
             self._loop = asyncio.new_event_loop()
@@ -656,8 +678,8 @@ class DashboardBridge:
             self._stop_event = asyncio.Event()
             try:
                 self._loop.run_until_complete(_server())
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[!] WebSocket server error: {e}")
             finally:
                 # Cancel remaining tasks
                 pending = asyncio.all_tasks(self._loop)

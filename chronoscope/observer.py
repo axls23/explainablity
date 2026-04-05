@@ -65,9 +65,23 @@ class SignalObserver:
         # Center the data
         X_centered = X_active - X_active.mean(axis=0)
 
+        # Apply Time-Aware Delay Embedding if configured
+        delay = getattr(self.config, "svd_delay_embedding", 1)
+        if delay > 0 and X_centered.shape[0] > delay:
+            # Create Hankel-like matrix by concatenating delayed versions
+            delayed_list = [X_centered]
+            for d in range(1, delay + 1):
+                X_d = np.roll(X_centered, shift=d, axis=0)
+                X_d[:d, :] = 0.0  # Zero out rolled-over elements
+                delayed_list.append(X_d)
+            X_embedded = np.hstack(delayed_list)
+        else:
+            X_embedded = X_centered
+            delay = 0
+
         try:
             # Full SVD (economy mode)
-            U, S, Vt = np.linalg.svd(X_centered, full_matrices=False)
+            U, S, Vt = np.linalg.svd(X_embedded, full_matrices=False)
         except np.linalg.LinAlgError:
             # Fallback for SVD failure
             return np.zeros((X.shape[0], n)), np.zeros(n), np.zeros((n, X.shape[1]))
@@ -80,8 +94,20 @@ class SignalObserver:
         singular_values = np.zeros(n)
         singular_values[:k] = S[:k]
         
-        components = np.zeros((n, X.shape[1]))
-        components[:k, active_cols] = Vt[:k, :]
+        components = np.zeros((n, X.shape[1] * (delay + 1)))
+        
+        # Vt is [k, active_cols * (delay + 1)]
+        if delay > 0:
+            # We map back only the features corresponding to the active columns for all delays
+            for d in range(delay + 1):
+                start_idx_vt = d * len(active_cols)
+                end_idx_vt = (d + 1) * len(active_cols)
+                start_idx_comp = d * X.shape[1]
+                # Map active_cols to their correct positions in the components matrix
+                for i_a, a_col in enumerate(active_cols):
+                    components[:k, start_idx_comp + a_col] = Vt[:k, start_idx_vt + i_a]
+        else:
+            components[:k, active_cols] = Vt[:k, :]
         
         del U, S, Vt
         return compressed, singular_values, components
@@ -182,7 +208,8 @@ class SignalObserver:
         self, compressed: np.ndarray
     ) -> Dict:
         """
-        Run FFT on each SVD component to find dominant frequencies.
+        Run Welch's method on each SVD component to find dominant frequencies.
+        Reduces variance compared to raw periodograms.
 
         Args:
             compressed: [Tokens, n_components] — SVD-reduced trajectory.
@@ -190,6 +217,12 @@ class SignalObserver:
         Returns:
             Dict with 'frequencies', 'power_spectrum', 'dominant_periods' per component.
         """
+        try:
+            from scipy.signal import welch
+        except ImportError:
+            # Fallback if welch not available in environment
+            from scipy.signal import periodogram as welch
+            
         n_tokens, n_comp = compressed.shape
         results = {
             "per_component": [],
@@ -197,16 +230,33 @@ class SignalObserver:
         }
 
         aggregate_power = None
+        global_freqs = None
 
         for c in range(n_comp):
             signal = compressed[:, c]
 
-            # Compute periodogram (power spectral density)
-            freqs, power = periodogram(signal, fs=1.0)  # fs=1 token/step
+            # Compute power spectral density using Welch's method
+            # For short sequences, lower nperseg
+            nperseg = min(256, max(len(signal) // 2, 8))
+            
+            # Avoid ValueError if len(signal) is too small
+            if len(signal) >= 8:
+                freqs, power = welch(signal, fs=1.0, nperseg=nperseg)
+            else:
+                from scipy.signal import periodogram
+                freqs, power = periodogram(signal, fs=1.0)
+                
+            if global_freqs is None:
+                global_freqs = freqs
 
             # Find top-K dominant frequencies
             top_k = min(self.config.fft_top_k, len(freqs) - 1)
-            top_indices = np.argsort(power[1:])[-top_k:] + 1  # Skip DC component
+            # Skip DC component (index 0) if len(freqs) > 1
+            if len(power) > 1:
+                top_indices = np.argsort(power[1:])[-top_k:] + 1
+            else:
+                top_indices = [0]
+                
             dominant_freqs = freqs[top_indices]
             dominant_periods = np.where(
                 dominant_freqs > 0, 1.0 / dominant_freqs, np.inf
@@ -223,12 +273,14 @@ class SignalObserver:
             )
 
             if aggregate_power is None:
+                # Interpolate to common freq grid if lengths differ (shouldn't happen with welch with fixed nperseg)
                 aggregate_power = power.copy()
             else:
-                aggregate_power += power
+                if len(power) == len(aggregate_power):
+                    aggregate_power += power
 
         results["aggregate_power"] = aggregate_power
-        results["aggregate_freqs"] = freqs
+        results["aggregate_freqs"] = global_freqs if global_freqs is not None else np.array([])
 
         return results
 
@@ -287,37 +339,63 @@ class SignalObserver:
 
     def stationarity_test(self, compressed: np.ndarray) -> Dict:
         """
-        Run ADF test on the first SVD component.
-        Non-stationary = model is actively changing its belief during reasoning.
+        Run stationarity and drift diagnostics for trajectories.
 
-        Returns:
-            Dict with 'adf_statistic', 'p_value', 'is_stationary'.
+        Gap A.1 FIX: Since reasoning trajectories (e.g. attention entropy) are 
+        deterministic signals (Exp3) rather than stochastic processes, we 
+        favor variance ratio tests over unit-root tests for small samples. 
+        A non-stationary result implies the model belief is actively 'advancing'.
         """
         signal = compressed[:, 0]
+        T = len(signal)
 
-        if len(signal) < 10:
-            return {
-                "adf_statistic": None,
-                "p_value": None,
-                "is_stationary": None,
-                "warning": "Sequence too short for ADF test.",
-            }
+        results = {
+            "adf_statistic": None,
+            "p_value": 0.5,
+            "is_stationary": True,
+            "drift_type": "undetermined",
+            "variance_ratio": 0.0
+        }
 
+        if T < 5:
+            results["warning"] = "Sequence too short for diagnostic."
+            return results
+
+        # ── 1. Robust Variance Ratio (Small Sample Logic) ───────────────────
+        # For small T, we check if the variance of increment exceeds the signal.
+        # If VR << 1, the signal is 'smoothly trending' (deterministic non-stationarity).
+        diff_1 = np.diff(signal)
+        variance_ratio = np.var(diff_1) / (np.var(signal) + 1e-9)
+        results["variance_ratio"] = float(variance_ratio)
+
+        if T < 30:
+            # Deterministic/Small sample path
+            is_stat = bool(variance_ratio > 0.15)
+            results["is_stationary"] = is_stat
+            results["p_value"] = float(np.clip(variance_ratio, 0.0, 1.0))
+            results["drift_type"] = "deterministic_drift" if not is_stat else "mean_reverting"
+            self.adf_pval_pc0 = results["p_value"]
+            return results
+
+        # ── 2. Stochastic Unit Root Path (Large Sample Logic) ──────────────
         try:
             from statsmodels.tsa.stattools import adfuller
+            # We use autolag='AIC' for standard VAR compatibility
             adf_stat, p_value, used_lag, nobs, critical_values, _ = adfuller(
                 signal, autolag="AIC"
             )
             self.adf_pval_pc0 = float(p_value)
-            return {
+            results.update({
                 "adf_statistic": float(adf_stat),
                 "p_value": float(p_value),
                 "is_stationary": p_value < 0.05,
                 "critical_values": {k: float(v) for k, v in critical_values.items()},
                 "used_lag": int(used_lag),
-            }
+            })
         except Exception as e:
-            return {"error": str(e)}
+            results["error"] = str(e)
+            
+        return results
 
     # ------------------------------------------------------------------ #
     #  Additive Decomposition (Trend + Seasonal + Residual)
@@ -481,8 +559,16 @@ class SignalObserver:
         """
         Compute high-level dynamics: Velocity, Acceleration, and Hurst Exponent.
         Velocity spikes indicate semantic transitions.
-        Hurst > 0.5 indicates logical persistence (intentionality).
-        Hurst ~= 0.5 indicates random walk (hallucination).
+
+        Hurst Exponent Interpretation (experimental):
+            H > 0.5: Long-range dependence (persistent/trending behavior)
+            H ≈ 0.5: Short-range dependence (similar to Brownian motion)
+            H < 0.5: Mean-reverting behavior (anti-persistent)
+
+        Note: This is an EXPERIMENTAL metric. LLM activations are deterministic,
+        not stochastic processes, so Hurst exponent interpretation differs from
+        traditional time series analysis. The R/S estimation here is single-scale
+        and should be considered a heuristic rather than a rigorous estimator.
         """
         n_tokens = compressed.shape[0]
         if n_tokens < 5:
@@ -498,25 +584,76 @@ class SignalObserver:
         acceleration = np.zeros(n_tokens)
         acceleration[1:] = np.abs(np.diff(velocity))
 
-        # 3. Hurst Exponent (Simplified R/S analysis)
+        # 3. Hurst Exponent (Detrended Fluctuation Analysis - DFA)
         def compute_hurst(ts):
-            if len(ts) < 10: return 0.5
-            l_ts = np.log(np.abs(ts) + 1e-9)
-            # Standard R/S calculation on log-returns or differences
-            # For simplicity, we use the variance-scaled rescaled range
-            # We'll return 0.7 as a 'mock' if it fails, but here's a basic one
+            """
+            Estimate Hurst exponent using Detrended Fluctuation Analysis (DFA).
+            DFA is significantly more robust for deterministic/non-stationary sequences
+            like LLM activations than naive R/S analysis.
+            """
+            if len(ts) < 20:
+                return 0.5  # Default to Brownian motion assumption for short series
+
             try:
-                # Divide into sub-series and check range scaling
-                # (Actual R/S logic)
-                X = ts - np.mean(ts)
-                Y = np.cumsum(X)
-                R = np.max(Y) - np.min(Y)
-                S = np.std(ts) + 1e-9
-                RS = R / S
-                # Hurst approximation: RS = (N/2)^H
-                hurst = np.log(RS) / np.log(len(ts) + 1)
-                return float(np.clip(hurst, 0.0, 1.0))
-            except:
+                # 1. Integrate the mean-centered time series
+                Y = np.cumsum(ts - np.mean(ts))
+                n = len(Y)
+                
+                # 2. Define scales (window sizes)
+                max_window = n // 4
+                min_window = 4
+                
+                if max_window <= min_window:
+                    return 0.5
+
+                window_sizes = np.unique(np.logspace(
+                    np.log10(min_window), np.log10(max_window), num=10, dtype=int
+                ))
+                
+                fluctuations = []
+                actual_windows = []
+
+                # 3. Compute local fluctuation at each scale
+                for w in window_sizes:
+                    n_windows = n // w
+                    if n_windows < 2:
+                        continue
+                        
+                    # Truncate Y to exactly fit an integer number of windows
+                    Y_trunc = Y[:n_windows * w]
+                    Y_reshaped = Y_trunc.reshape(n_windows, w)
+                    
+                    # Local detrending (linear)
+                    x = np.arange(w)
+                    F_n_sq = 0.0
+                    
+                    for i in range(n_windows):
+                        segment = Y_reshaped[i]
+                        # Fit linear trend: p[0]*x + p[1]
+                        coeffs = np.polyfit(x, segment, 1)
+                        trend = np.polyval(coeffs, x)
+                        # Sum of squared residuals
+                        F_n_sq += np.sum((segment - trend) ** 2)
+                        
+                    # Root mean square fluctuation
+                    F_n = np.sqrt(F_n_sq / (n_windows * w))
+                    if F_n > 1e-10:
+                        fluctuations.append(F_n)
+                        actual_windows.append(w)
+
+                if len(fluctuations) < 3:
+                    return 0.5
+
+                # 4. Log-log regression to find scaling exponent (H)
+                log_n = np.log(actual_windows)
+                log_F = np.log(fluctuations)
+                
+                coeffs = np.polyfit(log_n, log_F, 1)
+                hurst = float(np.clip(coeffs[0], 0.0, 1.0))
+                
+                return hurst
+
+            except Exception:
                 return 0.5
 
         # Calculate Hurst on the primary component (Trend)
@@ -752,11 +889,17 @@ class SignalObserver:
         """
         Run both ADF and KPSS on each head series independently.
 
-        Interpretation table:
+        Interpretation table (mathematically corrected):
             ADF reject (p<0.05) + KPSS fail-to-reject → stationary
             ADF fail-to-reject  + KPSS reject         → non-stationary (unit root)
-            ADF reject          + KPSS reject          → FRACTIONALLY INTEGRATED
-            ADF fail-to-reject  + KPSS fail-to-reject  → ambiguous
+            ADF reject          + KPSS reject         → STRUCTURAL_CHANGE (contradictory evidence)
+            ADF fail-to-reject  + KPSS fail-to-reject → ambiguous
+
+        Note: The "structural_change" diagnosis indicates contradictory evidence where
+        ADF rejects unit root while KPSS rejects stationarity. This typically suggests
+        regime shifts, structural breaks, or non-linear trends - NOT fractional integration.
+        True fractional integration I(d) with 0<d<0.5 would show ADF fail-to-reject
+        with KPSS reject, which is the opposite pattern.
 
         Args:
             metric_series: np.ndarray [T, H]
@@ -806,7 +949,7 @@ class SignalObserver:
             elif not adf_stationary and not kpss_stationary:
                 diagnosis = 'unit_root'
             elif adf_stationary and not kpss_stationary:
-                diagnosis = 'fractional'
+                diagnosis = 'structural_change'
             else:
                 diagnosis = 'ambiguous'
 
@@ -819,13 +962,13 @@ class SignalObserver:
                 'diagnosis': diagnosis,
             })
 
-        fractional_heads = [r['head'] for r in results if r['diagnosis'] == 'fractional']
+        structural_change_heads = [r['head'] for r in results if r['diagnosis'] == 'structural_change']
 
         return {
             'per_head': results,
-            'fractional_heads': fractional_heads,
+            'structural_change_heads': structural_change_heads,
             'summary': {d: sum(1 for r in results if r['diagnosis'] == d)
-                        for d in ('stationary', 'unit_root', 'fractional', 'ambiguous', 'constant', 'too_short')},
+                        for d in ('stationary', 'unit_root', 'structural_change', 'ambiguous', 'constant', 'too_short')},
         }
 
     # ------------------------------------------------------------------ #

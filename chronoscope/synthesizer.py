@@ -29,7 +29,7 @@ class ReportSynthesizer:
         prompt: str,
         generated_text: str,
         observer_results: Dict,
-        patching_results: Dict,
+        sensitivity_results: Dict,
         dtw_results: Dict,
         tda_results: Dict,
         validity_scores: Dict,
@@ -47,7 +47,7 @@ class ReportSynthesizer:
 
         plot_paths = self._export_plots(
             observer_results,
-            patching_results,
+            sensitivity_results,
             dtw_results,
             tda_results,
             head_interaction_results,
@@ -70,7 +70,7 @@ class ReportSynthesizer:
 
         return report_path
 
-    def _export_plots(self, observer, patching, dtw, tda, head_interactions, plot_dir):
+    def _export_plots(self, observer, sensitivity, dtw, tda, head_interactions, plot_dir):
         paths = {}
         feature_decomp = None
         if head_interactions:
@@ -109,7 +109,7 @@ class ReportSynthesizer:
         if (layer_traj := observer.get("compressed_trajectory")) is not None:
             if layer_traj.ndim == 2 and layer_traj.shape[1] >= 3:
                 html_path = os.path.join(os.path.dirname(plot_dir), "trajectory_3d.html")
-                token_labels = patching.get("token_labels") if patching else None
+                token_labels = sensitivity.get("token_labels") if sensitivity else None
                 self._export_interactive_3d(layer_traj, html_path, token_labels=token_labels)
                 paths["trajectory_3d"] = "trajectory_3d.html"
 
@@ -397,7 +397,7 @@ class ReportSynthesizer:
         final_score = validity.get("composite_validity", 0.0)
 
         lines = [
-            "# Chronoscope Causal Validity Report",
+            "# Chronoscope Reasoning Fidelity & Sensitivity Report",
             f"**Generated:** {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}",
             f"**Model:** {self.config.model_name}",
             "---",
@@ -477,9 +477,17 @@ class ReportSynthesizer:
 
         lines.append("## 8. Validity Score Breakdown")
         for m, score in validity.items():
-            if m not in ["composite_validity", "verdict"]:
-                lines.append(f"- **{m}**: {score:.4f}")
-        lines.append(f"### **FINAL SCORE: {final_score:.4f}**")
+            if m not in ["composite_validity", "verdict"] and not isinstance(score, list):
+                # Clean up metric names for the report
+                label = m.replace("_", " ").title()
+                lines.append(f"- **{label}**: {score:.4f}")
+        
+        if "landscape_norms" in tda:
+            lines.append("### Topology Stability: Persistence Landscapes")
+            avg_norm = np.mean(tda["landscape_norms"])
+            lines.append(f"- **Mean Landscape L2-Norm:** {avg_norm:.4f} (higher indicates more stable topological features)")
+        
+        lines.append(f"### **FINAL FIDELITY SCORE: {final_score:.4f}**")
         return "\n".join(lines)
         
     def append_interpretive_footnote(

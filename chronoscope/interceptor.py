@@ -49,6 +49,9 @@ class ChronoscopeInterceptor:
         # Each entry is a list of tensors shaped [Batch, n_heads] for each
         # generation step (treated as a multivariate time series over heads).
         self._head_metrics: Dict[str, List[torch.Tensor]] = {}
+        # Storage for previous attention distribution (per layer) for KL-divergence.
+        # Key: layer_name, Value: np.ndarray [H, T] normalized attention probs
+        self._prev_attn: Dict[str, np.ndarray] = {}
         self._hooks: List[torch.utils.hooks.RemovableHook] = []
 
         self._register_hooks()
@@ -144,6 +147,7 @@ class ChronoscopeInterceptor:
     def _compute_head_metrics(
         self,
         attn_weights: torch.Tensor,
+        layer_key: Optional[str] = None,
     ) -> dict:
         """
         Compute multiple per-head attention summary statistics for the most
@@ -155,6 +159,7 @@ class ChronoscopeInterceptor:
             max_attention:    max(pᵢ)
             effective_rank:   exp(H_shannon) / T
             sink_fraction:    fraction of weight on token 0
+            kl_divergence:   KL(P_{t-1} || P_t) for inter-step volatility (Phase 2)
 
         Returns:
             dict mapping metric_name → np.ndarray [H]
@@ -246,6 +251,33 @@ class ChronoscopeInterceptor:
         max_entropy = np.log(max(T_ctx, 2))  # log(T) in nats (matching entr output)
         normalized_entropy_np = shannon_np / max(max_entropy, 1e-9)
 
+        # ── KL-Divergence for Inter-Step Volatility (Phase 2 Assertion 2) ───────
+        # Compute KL(P_{t-1} || P_t) between consecutive attention distributions
+        # to detect "regime changes" in model focus. High KL indicates
+        # drastic attention shifts between tokens.
+        kl_div_np = np.zeros(H_heads, dtype=np.float64)
+        if layer_key is not None and layer_key in self._prev_attn:
+            prev_p = self._prev_attn[layer_key]  # [H, T_prev]
+            # Align dimensions: use min length between previous and current
+            min_len = min(prev_p.shape[1], p_np.shape[1])
+            if min_len > 0:
+                prev_aligned = prev_p[:, :min_len]
+                curr_aligned = p_np[:, :min_len]
+                # Normalize both to proper probability distributions
+                prev_aligned = prev_aligned / (prev_aligned.sum(axis=1, keepdims=True) + eps)
+                curr_aligned = curr_aligned / (curr_aligned.sum(axis=1, keepdims=True) + eps)
+                # KL(P || Q) = Σ P * log(P/Q)
+                kl_div_np = np.sum(
+                    prev_aligned * np.log(prev_aligned / (curr_aligned + eps) + eps),
+                    axis=1
+                )
+                # Handle NaN/Inf from numerical issues
+                kl_div_np = np.nan_to_num(kl_div_np, nan=0.0, posinf=10.0, neginf=0.0)
+
+        # Store current attention for next step's KL computation
+        if layer_key is not None:
+            self._prev_attn[layer_key] = p_np.copy()
+
         return {
             'shannon_entropy': shannon_np,
             'normalized_entropy': normalized_entropy_np,
@@ -260,6 +292,7 @@ class ChronoscopeInterceptor:
             'argmax_pos_norm': argmax_pos_norm_np,
             'spread_std': spread_std_np,
             'gini': gini_np,
+            'kl_divergence': kl_div_np,
         }
 
     def _compute_ov_weighted_metric(
@@ -312,8 +345,8 @@ class ChronoscopeInterceptor:
                 else:
                     return
 
-                metrics = self._compute_head_metrics(attn)  # dict of [H] arrays
                 layer_key = name.replace(".self_attn", "")
+                metrics = self._compute_head_metrics(attn, layer_key)  # dict of [H] arrays
                 self._append_head_metrics(layer_key, metrics)
             except Exception:
                 # Head metrics are best-effort; never break the forward pass.
@@ -341,7 +374,8 @@ class ChronoscopeInterceptor:
                 metrics['argmax_pos_norm'],
                 metrics['spread_std'],
                 metrics['gini'],
-            ], axis=1)  # [H, 13]
+                metrics['kl_divergence'],
+            ], axis=1)  # [H, 14]
             self._head_metrics.setdefault(layer_key, []).append(
                 torch.from_numpy(feature_vector).float()
             )
@@ -390,8 +424,8 @@ class ChronoscopeInterceptor:
                     elif attn.dim() != 4:
                         continue
 
-                    metrics = self._compute_head_metrics(attn)
                     layer_key = act_key_by_idx.get(layer_idx, f"layers.{layer_idx}")
+                    metrics = self._compute_head_metrics(attn, layer_key)
                     self._append_head_metrics(layer_key, metrics)
         except Exception:
             # Best-effort fallback only.

@@ -332,6 +332,7 @@ body::after{content:'';position:fixed;inset:0;background:repeating-linear-gradie
       <button class="tabbtn"        id="tb-hmm"  onclick="setVarTab('hmm')">D.4·HMM</button>
       <button class="tabbtn"        id="tb-sq"   onclick="setVarTab('sq')">E·SIGNAL</button>
       <button class="tabbtn"        id="tb-lag"  onclick="setVarTab('lag')">LAG-HORIZON</button>
+      <button class="tabbtn"        id="tb-stab" onclick="setVarTab('stab')">STABILITY</button>
     </div>
   </div>
   <div class="pc" style="padding:5px 8px;overflow:hidden">
@@ -369,6 +370,16 @@ body::after{content:'';position:fixed;inset:0;background:repeating-linear-gradie
       <div style="font-size:7px;color:var(--text2);letter-spacing:.12em;margin-bottom:4px">VAR FULL LAG-HORIZON (p=5) · rows=target · cols=[lag1_heads... lag5_heads]</div>
       <div id="lag-scroll" style="width:100%; height:calc(100% - 20px); overflow:auto; position:relative; background:rgba(0,0,0,0.2); border:1px solid var(--border)">
         <canvas id="c-lag-horizon" style="display:block"></canvas>
+      </div>
+    </div>
+    <div id="tab-stab" style="display:none;height:100%;overflow:hidden">
+      <div style="font-size:7px;color:var(--text2);letter-spacing:.12em;margin-bottom:4px;display:flex;justify-content:space-between">
+        <span>VAR STABILITY · roots of det(I - ΣA_l L^l) = 0</span>
+        <span id="v-stab-sr" style="color:var(--cyan)">Spectral Radius ρ: –</span>
+      </div>
+      <div style="position:relative;height:calc(100% - 16px);display:flex;justify-content:center;background:rgba(0,0,0,0.15);border-radius:2px">
+        <canvas id="c-stab"></canvas>
+        <div id="stab-status" style="position:absolute;top:10px;right:10px;font-size:8px;padding:3px 6px;border-radius:2px;background:rgba(0,0,0,0.6)">awaiting data</div>
       </div>
     </div>
   </div>
@@ -829,6 +840,8 @@ function processFrame(f) {
     renderMatrix(f.influence_matrix, f.fdr_reject, f.pval_matrix, f.significant_pairs);
   if(f.lag_horizon_matrix)
     renderLagHorizon(f.lag_horizon_matrix, f.n_lags);
+  if(f.stability_roots)
+    renderStability(f.stability_roots, f.spectral_radius);
   if(f.significant_pairs) renderInfluenceList(f.significant_pairs);
   if(f.pdc_low)  updatePDCChart(f.pdc_low, f.pdc_high);
 
@@ -1082,6 +1095,58 @@ function renderMatrix(infMat, fdrReject, pvalMat, sigPairs){
   document.getElementById('mat-cap').textContent = topPair
     ? `max: H${topPair.source}→H${topPair.target} (${topPair.score?.toFixed(3)}) · normalized to max=${maxV.toFixed(2)}`
     : `max_infl: ${maxV.toFixed(3)}`;
+}
+
+function renderStability(roots, radius){
+  const canvas = document.getElementById('c-stab');
+  const srVal  = document.getElementById('v-stab-sr');
+  const status = document.getElementById('stab-status');
+  if(!canvas || !roots) return;
+
+  const ctx = canvas.getContext('2d');
+  const w = 240, h = 240;
+  canvas.width = w; canvas.height = h;
+  ctx.clearRect(0,0,w,h);
+
+  const cx = w/2, cy = h/2, r = 90;
+
+  // Draw unit circle
+  ctx.beginPath();
+  ctx.arc(cx, cy, r, 0, Math.PI * 2);
+  ctx.strokeStyle = 'rgba(74, 104, 136, 0.4)';
+  ctx.setLineDash([2, 4]);
+  ctx.stroke();
+  ctx.setLineDash([]);
+
+  // Draw axes
+  ctx.beginPath();
+  ctx.moveTo(cx - r - 10, cy); ctx.lineTo(cx + r + 10, cy);
+  ctx.moveTo(cx, cy - r - 10); ctx.lineTo(cx, cy + r + 10);
+  ctx.strokeStyle = 'rgba(74, 104, 136, 0.2)';
+  ctx.stroke();
+
+  // Draw roots
+  roots.forEach(root => {
+    const rx = cx + root[0] * r;
+    const ry = cy - root[1] * r;
+    const mag = Math.sqrt(root[0]*root[0] + root[1]*root[1]);
+    ctx.beginPath();
+    ctx.arc(rx, ry, 2, 0, Math.PI * 2);
+    ctx.fillStyle = mag >= 1.0 ? '#ff3d50' : '#00d4ff';
+    ctx.fill();
+    if(mag >= 0.95) {
+      ctx.strokeStyle = 'rgba(255, 61, 80, 0.5)';
+      ctx.beginPath(); ctx.arc(rx, ry, 5, 0, Math.PI * 2); ctx.stroke();
+    }
+  });
+
+  if(radius != null){
+    srVal.textContent = `Spectral Radius ρ: ${radius.toFixed(4)}`;
+    srVal.style.color = radius >= 1.0 ? '#ff3d50' : radius > 0.9 ? '#ffb300' : '#00d4ff';
+    status.textContent = radius >= 1.0 ? 'NON-STATIONARY' : radius > 0.9 ? 'NEAR-UNSTABLE' : 'STABLE';
+    status.style.color = radius >= 1.0 ? '#ff3d50' : radius > 0.9 ? '#ffb300' : '#00ff88';
+    status.style.background = radius >= 1.0 ? 'rgba(255,61,80,0.1)' : 'rgba(0,0,0,0.4)';
+  }
 }
 
 function renderLagHorizon(matrix, nLags){
@@ -1613,7 +1678,7 @@ function initChatIsland(){
 // ── TAB SWITCHING ─────────────────────────────────────────────────────────────
 function setVarTab(tab){
   RT.varTab=tab;
-  ['inf','stat','pdc','hmm','sq','lag'].forEach(t=>{
+  ['inf','stat','pdc','hmm','sq','lag','stab'].forEach(t=>{
     const tabEl=document.getElementById(`tab-${t}`);
     const btn=document.getElementById(`tb-${t}`);
     if(!tabEl||!btn)return;

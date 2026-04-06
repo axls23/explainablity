@@ -15,7 +15,7 @@ class ChronoscopeConfig:
     model_name = "Qwen/Qwen2.5-0.5B"
     n_heads: int = 14
     hidden_dim: int = 896
-    total_tokens: int = 100
+    total_tokens: int = 512
     
     target_layer: int = 23
     local_model_snapshot_path: Optional[str] = None
@@ -32,7 +32,7 @@ class ChronoscopeConfig:
     target_layers: List[str] = field(
         default_factory=lambda: ["layers.", "h."]  # Matches Qwen (layers.) and GPT-2 (h.)
     )
-    max_cache_size: int = 1000  # Number of tokens to retain in CPU RAM during generation
+    max_cache_size: int = 32768  # Number of tokens to retain in CPU RAM during generation
 
     # Whether to derive per-head attention metrics (e.g., entropy) as an
     # additional multivariate time series for head–head interaction analysis.
@@ -68,7 +68,7 @@ class ChronoscopeConfig:
     save_plots: bool = True
 
     # --- Experiment ---
-    max_new_tokens: int = 50
+    max_new_tokens: int = 512
     dashboard_transport: str = "websocket"
     dashboard_ws_port: int = 8765
     dashboard_http_port: int = 8766

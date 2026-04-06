@@ -576,11 +576,26 @@ class SignalObserver:
 
         # 1. Velocity (L2 distance between consecutive hidden states)
         # Note: We pad with 0 at the start to keep the same length as tokens
+        # Also compute displacement vectors for momentum (cosine similarity)
         velocity = np.zeros(n_tokens)
+        momentum = np.zeros(n_tokens) # Cosine similarity between v_t and v_{t-1}
+        
         diffs = np.diff(compressed, axis=0) # [T-1, D]
         velocity[1:] = np.linalg.norm(diffs, axis=1)
+        
+        # 2. Momentum (Phase 2 Assertion 5)
+        # Cosine Similarity between v_t (diffs[t-1]) and v_{t-1} (diffs[t-2])
+        if n_tokens >= 3:
+            # Normalize diffs to get unit direction vectors
+            norms = np.linalg.norm(diffs, axis=1, keepdims=True)
+            unit_diffs = diffs / (norms + 1e-9)
+            
+            # Dot products of consecutive unit vectors = Cosine Similarity
+            # momentum[t] = cos_sim(v_t, v_{t-1})
+            cos_sims = np.sum(unit_diffs[1:] * unit_diffs[:-1], axis=1)
+            momentum[2:] = cos_sims
 
-        # 2. Acceleration (Change in velocity)
+        # 3. Acceleration (Change in velocity)
         acceleration = np.zeros(n_tokens)
         acceleration[1:] = np.abs(np.diff(velocity))
 
@@ -662,9 +677,11 @@ class SignalObserver:
 
         return {
             "velocity": velocity,
+            "momentum": momentum,
             "acceleration": acceleration,
             "hurst": hurst_val,
             "mean_velocity": float(np.mean(velocity)),
+            "mean_momentum": float(np.mean(momentum[2:])) if n_tokens >= 3 else 0.0,
             "max_velocity_token": int(np.argmax(velocity))
         }
 

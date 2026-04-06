@@ -76,7 +76,7 @@ _load_mimic_gallery()
 
 class ChatRequest(BaseModel):
     prompt: str = Field(..., min_length=1, description="User prompt text")
-    max_tokens: int = Field(default=100, ge=1, le=2048)
+    max_tokens: int = Field(default=512, ge=1, le=8192)
     temperature: float = Field(default=0.7, ge=0.0, le=2.0)
     run_var: bool = Field(default=True, description="Run VAR head interaction analysis post-generation")
     run_intervention: bool = Field(default=True, description="Run head knockout intervention (top-3 heads, deepest layer)")
@@ -308,12 +308,17 @@ def run_post_analysis_background(target_layer, current_traj, prompt_len, token_c
                         current_phase_idx=_observer.current_phase_idx,
                     )
 
+                head_result = None # Initialize
+                hmm_result = None  # Initialize
+                fdr_sig_pairs = 0
+                
                 # VAR head interaction analysis (if enabled)
                 if run_var and getattr(_config, "capture_attentions", False):
                     print("[*] Background: Running VAR head interaction analysis (multi-layer)...")
                     head_result = _analyzer.head_interaction_analysis(
                         prompt  # No layer_name → analyzer auto-selects mid + deepest layers
                     )
+                    hmm_result = None  # NEW: Initialize for score calculation
                     if "error" not in head_result:
                         fdr_sig_pairs = int((head_result.get("fdr_result") or {}).get("n_significant", 0))
                         if _bridge:
@@ -438,14 +443,12 @@ def run_post_analysis_background(target_layer, current_traj, prompt_len, token_c
                     spectral_result=observer_results.get("spectral", {}),
                     tda_result=tda_results,
                     stationarity_result=observer_results.get("stationarity", {}),
+                    var_result=head_result,
+                    hmm_result=hmm_result,
                 )
 
-                composite_score = int(round(validity.get("composite_validity", 0) * 100))
-                verdict = (
-                    "STRONG REASONING" if composite_score > 70 else
-                    "MODERATE REASONING" if composite_score > 50 else
-                    "HALLUCINATION RISK"
-                )
+                composite_score = int(round(validity.get("fidelity_score", 0)))
+                verdict = validity.get("verdict", "UNKNOWN")
 
                 if _bridge:
                     def _sf(v):
@@ -681,7 +684,7 @@ async def _trigger_mimic_next():
     # Create a ChatRequest
     req = ChatRequest(
         prompt=prompt,
-        max_tokens=120,
+        max_tokens=256,
         temperature=0.7,
         run_var=True,
         run_intervention=True

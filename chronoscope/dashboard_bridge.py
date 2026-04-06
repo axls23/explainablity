@@ -37,29 +37,28 @@ class _Encoder(json.JSONEncoder):
     """JSON encoder that handles numpy and torch-like objects safely."""
 
     def default(self, obj: Any):
-        if isinstance(obj, np.ndarray):
-            arr = obj.tolist()
-            if isinstance(arr, list):
-                return _replace_nan_in_list(arr)
-            return arr
-        if isinstance(obj, (np.integer,)):
-            return int(obj)
-        if isinstance(obj, (np.floating,)):
-            val = float(obj)
-            return None if np.isnan(val) else val
-        if isinstance(obj, (np.bool_,)):
-            return bool(obj)
-        if hasattr(obj, "detach") and hasattr(obj, "cpu") and hasattr(obj, "tolist"):
-            # torch.Tensor support without importing torch globally
-            return _replace_nan_in_list(obj.detach().cpu().tolist())
-        return super().default(obj)
+        return _sanitize_data(obj)
 
 
-def _replace_nan_in_list(value: Any) -> Any:
+def _sanitize_data(value: Any) -> Any:
+    """Recursively replace NaNs and resolve types for JSON compatibility."""
     if isinstance(value, list):
-        return [_replace_nan_in_list(v) for v in value]
-    if isinstance(value, float) and np.isnan(value):
+        return [_sanitize_data(v) for v in value]
+    if isinstance(value, dict):
+        return {k: _sanitize_data(v) for k, v in value.items()}
+    if isinstance(value, float) and (value != value or value == float('inf') or value == float('-inf')):
         return None
+    if isinstance(value, (np.integer,)):
+        return int(value)
+    if isinstance(value, (np.floating,)):
+        val = float(value)
+        return None if (val != val or val == float('inf') or val == float('-inf')) else val
+    if isinstance(value, (np.bool_,)):
+        return bool(value)
+    if isinstance(value, np.ndarray):
+        return _sanitize_data(value.tolist())
+    if hasattr(value, "detach") and hasattr(value, "cpu") and hasattr(value, "tolist"):
+        return _sanitize_data(value.detach().cpu().tolist())
     return value
 
 
@@ -302,6 +301,11 @@ class DashboardBridge:
             "pdc_low": pdc_low,
             "pdc_high": pdc_high,
             "topological_rank": head_result.get("topological_rank"),
+            "stability_roots": head_result.get("stability_roots"),
+            "spectral_radius": head_result.get("spectral_radius"),
+            "lag_horizon_matrix": head_result.get("lag_horizon_matrix"),
+            "n_lags": head_result.get("n_lags"),
+            "exog_weights": head_result.get("exog_weights"), # NEW: FAVAR coefficients
         }
         return frame
 
@@ -357,6 +361,10 @@ class DashboardBridge:
             "pdc_low": aggregated.get("pdc_low"),
             "pdc_high": aggregated.get("pdc_high"),
             "topological_rank": aggregated.get("topological_rank"),
+            "stability_roots": aggregated.get("stability_roots"),
+            "spectral_radius": aggregated.get("spectral_radius"),
+            "lag_horizon_matrix": aggregated.get("lag_horizon_matrix"),
+            "n_lags": aggregated.get("n_lags"),
         }
         return frame
 
@@ -392,11 +400,11 @@ class DashboardBridge:
         if not hmm_result:
             return
 
-        state_seq = hmm_result.get("state_sequence")
-        n_states = int(hmm_result.get("n_states_used", getattr(config, "hmm_n_states", 4)))
+        state_seq = hmm_result.get("states")
+        n_states = int(hmm_result.get("n_states", getattr(config, "hmm_n_states", 4)))
         means = hmm_result.get("state_means")
         trans = hmm_result.get("transition_matrix")
-        bic = hmm_result.get("bic")
+        bic = hmm_result.get("bic") or hmm_result.get("aic") # Fallback to AIC if BIC missing
 
         hmm_states = []
         if state_seq is not None:
@@ -430,6 +438,7 @@ class DashboardBridge:
                 "hmm_state_seq": state_seq,
                 "hmm_trans": trans,
                 "hmm_bic": _safe_float(bic),
+                "hmm_persistence": hmm_result.get("persistence_scores"), # NEW: state persistence
                 "hmm_ll": _safe_float(hmm_result.get("log_likelihood")),
                 "log_events": [{"type": "tda", "msg": log_msg}],
             }
@@ -602,7 +611,8 @@ class DashboardBridge:
 
     def _send(self, partial_frame: dict):
         self._last_frame.update(partial_frame)
-        payload = json.dumps(partial_frame, cls=_Encoder, allow_nan=False)
+        sanitized = _sanitize_data(partial_frame)
+        payload = json.dumps(sanitized, cls=_Encoder, allow_nan=False)
 
         if self.transport == "websocket":
             self._ws_broadcast(payload)

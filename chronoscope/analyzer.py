@@ -1034,6 +1034,10 @@ class CausalAnalyzer:
         """
         T, H = series_np.shape
 
+        # Guardrail: require enough samples relative to lag depth and binning.
+        if T <= (2 * k) or T < (discretize_bins // 2):
+            return np.zeros((H, H))
+
         def discretize(x: np.ndarray, n_bins: int) -> np.ndarray:
             bins = np.linspace(x.min(), x.max() + 1e-9, n_bins + 1)
             return np.digitize(x, bins) - 1
@@ -1672,6 +1676,7 @@ class CausalAnalyzer:
         # ── 4-6. Cointegration/VECM or VAR ────────────────────────────────
         USE_VECM = False
         series_for_var = filtered_series
+        H_total = series_for_model.shape[1]
 
         if stationarity_report['needs_diff']:
             # Check for cointegration before blindly differencing
@@ -1752,6 +1757,30 @@ class CausalAnalyzer:
                 result['differenced'] = True
                 result['diff_mask'] = diff_mask.tolist()
 
+        # Guardrail: ensure sufficient effective samples before fitting VAR
+        if not USE_VECM:
+            k_ar_guard = optimal_p
+            T_var = len(series_for_var)
+            T_eff_guard = T_var - k_ar_guard
+            if T_eff_guard <= max(3, H_active):
+                console.print(
+                    f"[yellow]Insufficient samples after preprocessing/differencing (T_eff={T_eff_guard}) for VAR. Using correlation fallback.[/]"
+                )
+                lagged_corr = self._correlation_fallback(series_for_var, lag=1)
+
+                full_influence = np.zeros((H_total, H_total))
+                for i, idx_i in enumerate(active_indices):
+                    for j, idx_j in enumerate(active_indices):
+                        full_influence[idx_i, idx_j] = lagged_corr[i, j]
+
+                result["influence_matrix"] = full_influence
+                result["lag_horizon_matrix"] = full_influence
+                result["n_lags"] = 1
+                result["is_fallback"] = True
+                result["model_type"] = "Correlation (Fallback: short_after_preprocess)"
+                result["var_max_lag"] = int(lag)
+                return result
+
         # ── Standard VAR path (Ridge Regularized Pipeline) ─────────────────────────
         var_result = None
         if not USE_VECM:
@@ -1820,7 +1849,6 @@ class CausalAnalyzer:
             self._selected_lag = k_ar
 
         # ── Re-map to full H×H matrix ─────────────────────────────────────
-        _, H_total = series_for_model.shape
         full_influence = np.zeros((H_total, H_total))
         
         # Calculate Lag Horizon Matrix for Heatmap (as requested by USER)

@@ -132,9 +132,20 @@ class ChronoscopeInterceptor:
         if not sink_positions:
             return cleaned
 
+        original = cleaned.copy()
+        sink_mass = cleaned[:, sink_positions].sum(axis=1, keepdims=True)
+        # If no head meaningfully uses the sink, leave distribution untouched.
+        if np.all(sink_mass < 1e-9):
+            return cleaned
+
         cleaned[:, sink_positions] = 0.0
 
         row_sums = cleaned.sum(axis=1, keepdims=True)
+        # If a row collapses (all mass on sink), fall back to the original row.
+        collapsed = row_sums < 1e-9
+        if np.any(collapsed):
+            cleaned[collapsed[:, 0]] = original[collapsed[:, 0]]
+            row_sums = cleaned.sum(axis=1, keepdims=True)
         row_sums = np.where(row_sums < 1e-9, 1.0, row_sums)
         cleaned = cleaned / row_sums
         cleaned = np.nan_to_num(cleaned, nan=0.0, posinf=0.0, neginf=0.0)

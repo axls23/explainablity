@@ -211,6 +211,7 @@ body::after{content:'';position:fixed;inset:0;background:repeating-linear-gradie
   <div class="hdr-sep">│</div>
   <div class="hdr-sub" id="hdr-model">No model loaded</div>
   <div class="hdr-pills">
+    <div class="pill" id="hdr-stream" style="color:var(--text2)">STREAM: IDLE</div>
     <div class="pill"><div class="dot dot-w" id="dot-hooks"></div><span id="lbl-hooks">HOOKS·IDLE</span></div>
     <div class="pill"><div class="dot dot-w" id="dot-var"></div><span id="lbl-var">VAR·IDLE</span></div>
     <div class="pill"><div class="dot dot-w" id="dot-fdr"></div><span id="lbl-fdr">FDR·IDLE</span></div>
@@ -546,6 +547,7 @@ const CFG = {
 const RT = {
   connected:   false,
   ws_url:      null,
+  stream_status: null,
   n_heads:     CFG.N_HEADS_DEFAULT,
   n_states:    4,
   token_idx:   null,
@@ -561,6 +563,9 @@ const RT = {
   phase_segments: [],
   last_frame:  null,
   chat_sending:false,
+  poll_error_logged:false,
+  last_stream_flags:null,
+  last_ws_error:null,
 };
 
 // ── HEAD COLOURS ─────────────────────────────────────────────────────────────
@@ -705,6 +710,14 @@ window.ChronoscopeBridge = {
 
 function processFrame(f) {
   if(!RT.connected) setConnected(true);
+  if(f.stream_status) updateStreamStatus(f.stream_status);
+  if(f.stream_flags){
+    const joined = f.stream_flags.join(',');
+    if(joined !== RT.last_stream_flags){
+      addLog('warn', `Stream fallback: ${f.stream_flags.join(', ')}`);
+      RT.last_stream_flags = joined;
+    }
+  }
 
   // ── Identity / config ──────────────────────────────────────────────────
   if(f.n_heads && f.n_heads !== RT.n_heads){
@@ -765,6 +778,7 @@ function processFrame(f) {
   if(f.entropy_row) updateEntropyChart(f.token_idx, f.entropy_row);
 
   // ── Gap B — VAR influence matrix ──────────────────────────────────────
+  if(f.is_fallback) addLog('warn','VAR/causality fallback in effect (low data or alt path)');
   if(f.influence_matrix && f.fdr_reject)
     renderMatrix(f.influence_matrix, f.fdr_reject, f.pval_matrix, f.significant_pairs);
   if(f.significant_pairs) renderInfluenceList(f.significant_pairs);
@@ -1318,6 +1332,31 @@ function setConnected(yes){
   if(yes) addLog('ok','ChronoscopeBridge connected — receiving live data');
 }
 
+function updateStreamStatus(status){
+  RT.stream_status = status || null;
+  const el = document.getElementById('hdr-stream');
+  if(!el) return;
+  const mode = status?.mode || 'unknown';
+  const transport = status?.transport || '–';
+  const lastErr = status?.last_error;
+  el.textContent = `STREAM: ${mode.toUpperCase()} · ${transport}`;
+  let color = 'var(--text2)';
+  if(lastErr){
+    color = 'var(--pink)';
+    if(RT.last_ws_error !== lastErr){
+      addLog('err', `Stream error (${lastErr})`);
+      RT.last_ws_error = lastErr;
+    }
+  }else if(mode === 'live'){
+    color = 'var(--green)';
+  }else if(mode === 'poll'){
+    color = 'var(--amber)';
+  }else{
+    color = 'var(--cyan)';
+  }
+  el.style.color = color;
+}
+
 function appendChatMessage(role, text){
   const wrap = document.getElementById('ci-messages');
   if(!wrap) return;
@@ -1435,7 +1474,10 @@ function tryWebSocket(startIdx=0){
       try { ChronoscopeBridge.push(JSON.parse(e.data)); }
       catch(err){ addLog('err', `JSON parse error: ${err.message}`); }
     };
-    ws.onerror  = () => {};  // silent — file poll is the fallback
+    ws.onerror  = () => {
+      addLog('err', `WebSocket error on ${url}`);
+      setConnected(false);
+    };
     ws.onclose  = () => {
       if(RT.connected){
         addLog('err','WebSocket disconnected — awaiting reconnect');
@@ -1461,7 +1503,12 @@ function tryFilePoll(){
         ChronoscopeBridge.push(frame);
       }
     })
-    .catch(()=>{});  // silently ignore — WebSocket is primary
+    .catch(()=>{
+      if(!RT.poll_error_logged){
+        addLog('err','File poll failed — waiting for WebSocket');
+        RT.poll_error_logged = true;
+      }
+    });  // WebSocket is primary
 }
 
 // ── DEMO DATA GENERATOR ───────────────────────────────────────────────────────

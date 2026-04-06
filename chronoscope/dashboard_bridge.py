@@ -117,6 +117,7 @@ class DashboardBridge:
         self._last_frame: dict[str, Any] = {}
         self._stop_event: Optional[asyncio.Event] = None
         self._ws_server = None
+        self._ws_last_error: Optional[str] = None
 
         self._http_server = None
         self._http_thread: Optional[threading.Thread] = None
@@ -173,6 +174,7 @@ class DashboardBridge:
         preferred_layer = f"layers.{layer_idx}" if layer_idx is not None else None
 
         entropy_row = entropy_row_override
+        stream_flags = []
         if preferred_layer:
             metric_series = interceptor.get_head_metric_series(preferred_layer)
             if entropy_row is None and metric_series is not None and getattr(metric_series, "numel", lambda: 0)() > 0:
@@ -186,6 +188,7 @@ class DashboardBridge:
                 if entropy_row is None and metric_series is not None and getattr(metric_series, "numel", lambda: 0)() > 0:
                     _n = metric_series.shape[0]
                     entropy_row = metric_series[min(int(token_idx), _n - 1)]
+                    stream_flags.append("entropy_row_substituted")
 
         if entropy_row is not None and hasattr(entropy_row, "ndim") and entropy_row.ndim > 1:
             # Vector mode [H, F] -> select column from active metric type.
@@ -195,6 +198,7 @@ class DashboardBridge:
                 entropy_row = entropy_row[:, col]
             else:
                 entropy_row = entropy_row[:, 0]
+                stream_flags.append("metric_column_fallback")
 
         velocity = None
         arc_steps = getattr(observer, "arc_steps", None)
@@ -220,6 +224,7 @@ class DashboardBridge:
             "cot_time_axis": "step-level (D.1)" if getattr(config, "use_cot_time_axis", False) else "token-level",
             "cot_n_steps": getattr(observer, "n_cot_steps", None),
             "log_events": log_events or [],
+            "stream_flags": stream_flags or None,
         }
         self._send(frame)
 
@@ -302,6 +307,8 @@ class DashboardBridge:
             "pdc_low": pdc_low,
             "pdc_high": pdc_high,
             "topological_rank": head_result.get("topological_rank"),
+            "is_fallback": bool(head_result.get("is_fallback")),
+            "model_type": head_result.get("model_type"),
         }
         return frame
 
@@ -357,6 +364,8 @@ class DashboardBridge:
             "pdc_low": aggregated.get("pdc_low"),
             "pdc_high": aggregated.get("pdc_high"),
             "topological_rank": aggregated.get("topological_rank"),
+            "is_fallback": bool(aggregated.get("is_fallback")),
+            "model_type": aggregated.get("model_type"),
         }
         return frame
 
@@ -602,6 +611,8 @@ class DashboardBridge:
 
     def _send(self, partial_frame: dict):
         self._last_frame.update(partial_frame)
+        partial_frame = dict(partial_frame)
+        partial_frame["stream_status"] = self._stream_status()
         payload = json.dumps(partial_frame, cls=_Encoder, allow_nan=False)
 
         if self.transport == "websocket":
@@ -610,6 +621,16 @@ class DashboardBridge:
             self._write_file(partial_frame)
         elif self.transport == "inject" and self.inject_fn:
             self.inject_fn(f"window.ChronoscopeBridge.push({payload})")
+
+    def _stream_status(self) -> dict:
+        mode = "live" if self.transport == "websocket" else ("poll" if self.transport == "file" else "inject")
+        status = {
+            "transport": self.transport,
+            "mode": mode,
+        }
+        if self._ws_last_error:
+            status["last_error"] = self._ws_last_error
+        return status
 
     def _write_file(self, frame: dict):
         frame = dict(frame)
@@ -622,12 +643,14 @@ class DashboardBridge:
             return
 
         async def _do_send():
+            self._ws_last_error = None
             dead = set()
             for ws in list(self._ws_clients):
                 try:
                     await ws.send(payload)
                 except Exception:
                     dead.add(ws)
+                    self._ws_last_error = "send_failed"
             self._ws_clients -= dead
 
         asyncio.run_coroutine_threadsafe(_do_send(), self._loop)

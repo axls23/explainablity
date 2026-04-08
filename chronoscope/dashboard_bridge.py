@@ -218,6 +218,7 @@ class DashboardBridge:
             "adf_pval_pc0": _safe_float(getattr(observer, "adf_pval_pc0", None)),
             "cot_time_axis": "step-level (D.1)" if getattr(config, "use_cot_time_axis", False) else "token-level",
             "cot_n_steps": getattr(observer, "n_cot_steps", None),
+            "predictive_entropy": getattr(interceptor, "_predictive_entropy", []),
             "log_events": log_events or [],
         }
         self._send(frame)
@@ -583,6 +584,32 @@ class DashboardBridge:
             frame["sig_pairs"] = int(composite.get("fdr_sig_pairs", 0))
         if interpretation:
             frame["interpretation"] = interpretation
+        self._send(frame)
+
+    def push_trajectory_frame(self, compressed_trajectory: np.ndarray, labels: list[str] | None = None):
+        """Push 3D trajectory coordinates (PC0, PC1, PC2) to the dashboard."""
+        if compressed_trajectory is None or compressed_trajectory.ndim != 2:
+            return
+        
+        # Take first 3 components for 3D visualization
+        n_comp = compressed_trajectory.shape[1]
+        coords = compressed_trajectory[:, :min(3, n_comp)]
+        
+        # If we have fewer than 3 components, pad with zeros
+        if coords.shape[1] < 3:
+            padding = np.zeros((coords.shape[0], 3 - coords.shape[1]))
+            coords = np.hstack([coords, padding])
+            
+        frame = {
+            "trajectory_3d": coords,
+            "trajectory_labels": labels,
+            "log_events": [
+                {
+                    "type": "ok",
+                    "msg": f"D.3/E.1: 3D Trajectory mapped ({coords.shape[0]} points)",
+                }
+            ],
+        }
         self._send(frame)
 
     def push_log(self, type_: str, msg: str):

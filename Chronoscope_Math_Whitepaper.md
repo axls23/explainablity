@@ -36,6 +36,18 @@ To apply classical time series mathematics to deterministic LLM hidden states, w
     *   *Assumption*: Many tests assume Gaussian (Normal) distributions. Activations are often sparse or fat-tailed.
     *   *Real-World Solution*: We utilize **Non-Parametric TDA** (which depends only on distance geometry) and **Robust Wald Tests** with **White Standard Errors** to protect against statistical artifacts.
 
+### Formal Test Assumptions (VAR, ADF, KPSS)
+
+*   **Vector Autoregression (VAR)**
+    *   *Statistical Assumption*: Requires **covariance-stationarity** across all time series vectors. Residuals (innovations) must be multivariate white noise (zero mean, no serial correlation, constant variance). Assumes no perfect multicollinearity between endogenous variables.
+    *   *Chronoscope Context*: Because raw attention head outputs exhibit high multicollinearity and drift, we apply SVD dimensionality reduction and first-differencing before VAR fitting to satisfy stability constraints.
+*   **Augmented Dickey-Fuller (ADF) Test**
+    *   *Statistical Assumption*: Assumes the underlying process is an autoregressive model of order $p$. Residuals in the test regression must be independent and homoskedastic. **Null Hypothesis**: The time series contains a unit root (is non-stationary).
+    *   *Chronoscope Context*: Acts as a gatekeeper. If ADF fails to reject the null, it indicates the LLM reasoning path is "trending" (accumulating unchecked context) rather than stabilizing on an answer.
+*   **Kwiatkowski-Phillips-Schmidt-Shin (KPSS) Test**
+    *   *Statistical Assumption*: Assumes the time series can be decomposed into a deterministic trend, a random walk, and a stationary error term. **Null Hypothesis**: The series is stationary around a deterministic trend (trend-stationary) or fixed level. 
+    *   *Chronoscope Context*: Used in conjunction with ADF for strict cross-validation. Since ADF has low power against near-unit-root processes, KPSS ensures we correctly distinguish a deterministic reasoning trajectory from a true internal random walk.
+
 ---
 
 ## 4. Translating Math into LLM Reasoning States

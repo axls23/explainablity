@@ -12,7 +12,9 @@ Gap E upgrades:
 """
 
 import gc
+import math
 import threading
+import time
 import warnings
 import numpy as np
 import torch
@@ -45,6 +47,8 @@ class ChronoscopeInterceptor:
         # Storage for captured activations
         # Key: layer_name, Value: list of tensors (one per token during generation)
         self._activations: Dict[str, List[torch.Tensor]] = {}
+        # Storage for predictive entropy (bits)
+        self._predictive_entropy: List[float] = []
         # Storage for per-head summary metrics derived from attention weights.
         # Each entry is a list of tensors shaped [Batch, n_heads] for each
         # generation step (treated as a multivariate time series over heads).
@@ -53,6 +57,11 @@ class ChronoscopeInterceptor:
         # Key: layer_name, Value: np.ndarray [H, T] normalized attention probs
         self._prev_attn: Dict[str, np.ndarray] = {}
         self._hooks: List[torch.utils.hooks.RemovableHook] = []
+        
+        # Ablation mask [n_layers, n_heads] - cache for performance if needed
+        self._ablation_map: Dict[int, List[int]] = {}
+        if getattr(self.config, 'ablation_enabled', False):
+            self._prepare_ablation()
 
         self._register_hooks()
 
@@ -93,6 +102,47 @@ class ChronoscopeInterceptor:
                     hidden.detach().cpu().float()
                 )
 
+        return hook_fn
+
+    def _prepare_ablation(self):
+        """Pre-calculate head indices for ablation."""
+        heads = self.config.ablation_heads
+        layers = self.config.ablation_layers
+        
+        # If no layers specified, use all
+        target_layers = layers if layers else list(range(100)) # dummy large
+        for l in target_layers:
+            self._ablation_map[l] = heads
+        console.print(f"[bold red]Ablation prepared for heads {heads} across layers {layers or 'all'}[/]")
+
+    def _make_ablation_hook(self, layer_idx: int):
+        """Creates a hook that zeroes out specific attention head outputs."""
+        head_dim = self.config.hidden_dim // self.config.n_heads
+        heads_to_kill = self.config.ablation_heads
+        
+        def hook_fn(module, input, output):
+            # Qwen attention output is a tuple: (attn_output, attn_weights, ...)
+            if isinstance(output, tuple):
+                attn_output = output[0]
+            else:
+                attn_output = output
+                
+            if not isinstance(attn_output, torch.Tensor):
+                return output
+            
+            # attn_output shape: [Batch, SeqLen, HiddenDim]
+            # Zero out the slices for specific heads
+            for head_idx in heads_to_kill:
+                start = head_idx * head_dim
+                end = start + head_dim
+                # In-place modification to affect the forward pass
+                attn_output[..., start:end] = 0.0
+                
+            if isinstance(output, tuple):
+                # We must return a tuple consistent with the original
+                return (attn_output,) + output[1:]
+            return attn_output
+            
         return hook_fn
 
     # ------------------------------------------------------------------ #
@@ -453,6 +503,36 @@ class ChronoscopeInterceptor:
                 )
                 self._hooks.append(attn_handle)
 
+            # Ablation registration (Exp7)
+            if (
+                getattr(self.config, 'ablation_enabled', False)
+                and name.endswith("self_attn")
+            ):
+                # Extract layer index from name (e.g., model.layers.0.self_attn)
+                parts = name.split(".")
+                layer_idx = -1
+                for p in parts:
+                    if p.isdigit():
+                        layer_idx = int(p)
+                        break
+                
+                if self.config.ablation_layers == [] or layer_idx in self.config.ablation_layers:
+                    ablation_handle = module.register_forward_hook(
+                        self._make_ablation_hook(layer_idx)
+                    )
+                    self._hooks.append(ablation_handle)
+                    console.print(f"[bold orange3]Ablation hook active on layer {layer_idx} (Heads: {self.config.ablation_heads})[/]")
+
+        # Hook lm_head for predictive entropy alignment (Exp6)
+        # Note: we hook the root model's lm_head specifically for tokens alignment.
+        if getattr(self.config, "capture_predictive_entropy", True):
+            for name, module in self.model.named_modules():
+                if name == "lm_head":
+                    h = module.register_forward_hook(self._make_predictive_entropy_hook())
+                    self._hooks.append(h)
+                    console.print(f"[bold cyan]Interceptor attached to predictive head: {name}[/]")
+                    break
+
         console.print(f"[bold green]Interceptor attached to {attached} layers.[/]")
 
     def _resolve_generation_model(self):
@@ -472,6 +552,27 @@ class ChronoscopeInterceptor:
         """Reset activation buffers."""
         self._activations.clear()
         self._head_metrics.clear()
+        self._predictive_entropy.clear()
+
+    def _make_predictive_entropy_hook(self):
+        """Hook for the language model head to capture next-token uncertainty."""
+        def hook(module, input, output):
+            # output is logits [B, T, V]
+            # during generation, T is usually 1.
+            with torch.no_grad():
+                logits = output
+                if logits.dim() == 3:
+                    logits = logits[:, -1, :] # [B, V]
+                
+                # Use numerically stable torch.special.entr as requested
+                # log2 factor for bits
+                # H = sum(entr(p)) / log(2)
+                probs = torch.softmax(logits, dim=-1)
+                h_nats = torch.special.entr(probs).sum(dim=-1) # [B]
+                h_bits = h_nats.mean().item() / math.log(2)
+                
+                self._predictive_entropy.append(h_bits)
+        return hook
 
     # ------------------------------------------------------------------ #
     #  Capture: Single Forward Pass

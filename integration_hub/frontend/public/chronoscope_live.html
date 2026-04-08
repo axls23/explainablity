@@ -5,6 +5,7 @@
 <meta name="viewport" content="width=device-width,initial-scale=1.0">
 <title>CHRONOSCOPE · Live Dashboard</title>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.js"></script>
+<script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
 <style>
 @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:ital,wght@0,300;0,400;0,500;0,700;1,400&display=swap');
 :root{
@@ -333,6 +334,7 @@ body::after{content:'';position:fixed;inset:0;background:repeating-linear-gradie
       <button class="tabbtn"        id="tb-sq"   onclick="setVarTab('sq')">E·SIGNAL</button>
       <button class="tabbtn"        id="tb-lag"  onclick="setVarTab('lag')">LAG-HORIZON</button>
       <button class="tabbtn"        id="tb-stab" onclick="setVarTab('stab')">STABILITY</button>
+      <button class="tabbtn"        id="tb-traj" onclick="setVarTab('traj')">3D-TRAJECTORY</button>
     </div>
   </div>
   <div class="pc" style="padding:5px 8px;overflow:hidden">
@@ -381,6 +383,12 @@ body::after{content:'';position:fixed;inset:0;background:repeating-linear-gradie
         <canvas id="c-stab"></canvas>
         <div id="stab-status" style="position:absolute;top:10px;right:10px;font-size:8px;padding:3px 6px;border-radius:2px;background:rgba(0,0,0,0.6)">awaiting data</div>
       </div>
+    </div>
+    <div id="tab-traj" style="display:none;height:100%;overflow:hidden;background:var(--bg2)">
+      <div style="font-size:7px;color:var(--text2);letter-spacing:.12em;margin-bottom:4px">
+        E.1 — 3D LATENT TRAJECTORY · PCA/SVD MANIFOLD [PC0, PC1, PC2]
+      </div>
+      <div id="c-traj-3d" style="width:100%; height:calc(100% - 20px)"></div>
     </div>
   </div>
 </div>
@@ -616,6 +624,7 @@ const RT = {
   hmm_states:  [],
   hmm_trans:   [],
   phase_segments: [],
+  predictive_history: [],
   last_frame:  null,
   chat_sending:false,
 };
@@ -646,15 +655,24 @@ function initCharts(nH){
   if(charts.entropy) charts.entropy.destroy();
   charts.entropy=mkChart('c-entropy',{
     type:'line',
-    data:{labels:[],datasets:Array.from({length:nH},(_,h)=>({
-      label:`H${h}`,data:[],borderColor:headColor(h),
-      borderWidth:h<3?1.5:.6,tension:.3,pointRadius:0,fill:false,
-      borderDash:h>9?[2,3]:[],
-    }))},
+    data:{
+      labels:[],
+      datasets:[
+        ...Array.from({length:nH},(_,h)=>({
+          label:`H${h}`,data:[],borderColor:headColor(h),
+          borderWidth:h<3?1.5:.6,tension:.3,pointRadius:0,fill:false,
+          borderDash:h>9?[2,3]:[],
+        })),
+        {
+          label:'Predictive (Logits)', data:[], borderColor:'#ffffff',
+          borderWidth:2, tension:.3, pointRadius:0, fill:false,
+        }
+      ]
+    },
     options:{responsive:true,maintainAspectRatio:false,animation:{duration:0},
       plugins:{legend:{display:true,position:'top',labels:{boxWidth:6,boxHeight:2,padding:5,font:{size:8},color:'#4a6888'}},
         tooltip:{backgroundColor:'#101820',borderColor:'#1c2d3e',borderWidth:1,
-          callbacks:{title:c=>`Token ${c[0].label}`,label:c=>` H${c.datasetIndex}: ${c.parsed.y.toFixed(3)}`}}},
+          callbacks:{title:c=>`Token ${c[0].label}`,label:c=>` ${c.datasetIndex < nH ? 'H'+c.datasetIndex : 'Predictive'}: ${c.parsed.y.toFixed(3)}`}}},
       scales:{x:{grid:{color:'rgba(28,45,62,.4)',lineWidth:.5},ticks:{maxTicksLimit:8,color:'#2a4060'}},
               y:{min:0,max:5,grid:{color:'rgba(28,45,62,.4)',lineWidth:.5},ticks:{color:'#2a4060',stepSize:1}}}}
   });
@@ -791,6 +809,8 @@ function processFrame(f) {
     document.getElementById('hdr-model').textContent =
       `${f.model_name} · layer ${f.layer_idx ?? '–'} · ${f.n_heads ?? '–'}h · d=${f.hidden_dim ?? '–'}`;
   }
+
+  if(f.predictive_entropy) RT.predictive_history = f.predictive_entropy;
   if(f.token_idx != null){
     RT.token_idx = f.token_idx;
     document.getElementById('hdr-tok').textContent = f.token_idx;
@@ -865,6 +885,7 @@ function processFrame(f) {
 
   // ── Gap E — Signal quality ────────────────────────────────────────────
   if(f.signal_quality) renderSignalQuality(f.signal_quality);
+  if(f.trajectory_3d)  renderTrajectory3D(f.trajectory_3d, f.trajectory_labels);
 
   // ── Composite score ───────────────────────────────────────────────────
   if(f.fidelity_score != null) updateScore(f);
@@ -977,9 +998,20 @@ function redrawEntropyChartForMetric(metricKey){
   const len = labels.length;
 
   charts.entropy.data.labels = labels.slice();
-  charts.entropy.data.datasets.forEach((ds, i) => {
+  
+  // Per-head datasets
+  charts.entropy.data.datasets.slice(0, RT.n_heads).forEach((ds, i) => {
     ds.data = hist[i] || [];
   });
+
+  // Predictive dataset (Exp6)
+  const predDS = charts.entropy.data.datasets[RT.n_heads];
+  if (predDS) {
+    const len = labels.length;
+    predDS.data = RT.predictive_history.slice(-len);
+    // Predictive entropy is Shannon-based, only show on appropriate tab
+    predDS.hidden = (metricKey !== 'shannon');
+  }
 
   // Find local max for dynamic scaling if static is too restrictive
   let localMax = 0;
@@ -1239,6 +1271,55 @@ function updatePDCChart(pdcLow, pdcHigh){
     charts.pdcHigh.data.datasets[0].data = pdcHigh.map(v=>+v.toFixed(4));
     charts.pdcHigh.options.scales.y.max  = Math.max(1, Math.ceil(Math.max(...pdcHigh)*1.2*10)/10);
     charts.pdcHigh.update('none');
+  }
+}
+
+function renderTrajectory3D(coords, labels){
+  const el = document.getElementById('c-traj-3d');
+  if(!el || !coords || coords.length < 2) return;
+  
+  const x = coords.map(c => c[0]);
+  const y = coords.map(c => c[1]);
+  const z = coords.map(c => c[2]);
+  
+  const trace = {
+    x: x, y: y, z: z,
+    mode: 'lines+markers',
+    type: 'scatter3d',
+    marker: {
+      size: 3,
+      color: Array.from({length: coords.length}, (_, i) => i),
+      colorscale: 'Viridis',
+      opacity: 0.8
+    },
+    line: {
+      width: 4,
+      color: '#00d4ff',
+      opacity: 0.5
+    },
+    text: labels || Array.from({length: coords.length}, (_, i) => `t=${i}`),
+    hoverinfo: 'text'
+  };
+
+  const layout = {
+    margin: { l: 0, r: 0, b: 0, t: 0 },
+    paper_bgcolor: 'rgba(0,0,0,0)',
+    plot_bgcolor: 'rgba(0,0,0,0)',
+    scene: {
+      xaxis: { title: 'PC0', gridcolor: 'rgba(74,104,136,0.2)', zerolinecolor: 'rgba(74,104,136,0.4)', color: '#4a6888' },
+      yaxis: { title: 'PC1', gridcolor: 'rgba(74,104,136,0.2)', zerolinecolor: 'rgba(74,104,136,0.4)', color: '#4a6888' },
+      zaxis: { title: 'PC2', gridcolor: 'rgba(74,104,136,0.2)', zerolinecolor: 'rgba(74,104,136,0.4)', color: '#4a6888' },
+      bgcolor: 'rgba(10,14,18,0.8)'
+    }
+  };
+
+  const config = { responsive: true, displayModeBar: false };
+  
+  if(!RT.traj_initialized){
+    Plotly.newPlot(el, [trace], layout, config);
+    RT.traj_initialized = true;
+  } else {
+    Plotly.react(el, [trace], layout, config);
   }
 }
 
@@ -1678,7 +1759,7 @@ function initChatIsland(){
 // ── TAB SWITCHING ─────────────────────────────────────────────────────────────
 function setVarTab(tab){
   RT.varTab=tab;
-  ['inf','stat','pdc','hmm','sq','lag','stab'].forEach(t=>{
+  ['inf','stat','pdc','hmm','sq','lag','stab','traj'].forEach(t=>{
     const tabEl=document.getElementById(`tab-${t}`);
     const btn=document.getElementById(`tb-${t}`);
     if(!tabEl||!btn)return;

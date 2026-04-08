@@ -37,6 +37,7 @@ class ChronoscopeConfig:
     # Whether to derive per-head attention metrics (e.g., entropy) as an
     # additional multivariate time series for head–head interaction analysis.
     capture_attentions: bool = True
+    capture_predictive_entropy: bool = True  # Entropy over model logits distribution (Exp6)
     head_metric: str = "entropy"  # currently: "entropy" over attention weights
     head_var_max_lag: int = 2     # reduced for stability with short sequences
 
@@ -131,6 +132,11 @@ class ChronoscopeConfig:
     arc_length_n_points: int = 80
     use_hmm_phase_discovery: bool = True      # amber — requires hmmlearn
     hmm_n_states: int = 4
+
+    # ── Gap F: Intervention / Ablation (Exp7) ──────────────────────────────
+    ablation_enabled: bool = True
+    ablation_heads: List[int] = field(default_factory=lambda: [1, 2, 12])
+    ablation_layers: List[int] = field(default_factory=lambda: []) # Empty = all
 
     # ── Gap E: Signal Quality ──────────────────────────────────────────────
     head_metric_type: str = 'shannon_entropy' # 'shannon_entropy' | 'renyi_entropy_2' | 'effective_rank'

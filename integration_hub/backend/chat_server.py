@@ -288,6 +288,10 @@ def run_post_analysis_background(target_layer, current_traj, prompt_len, token_c
 
                 if _bridge:
                     _bridge.push_token_frame(token_count, _interceptor, _observer, _config)
+                    # Push 3D trajectory data
+                    compressed = observer_results["compressed_trajectory"]
+                    # If tokenizer was provided, we could provide labels; for now, use indicies
+                    _bridge.push_trajectory_frame(compressed)
 
                 # TDA
                 compressed = observer_results["compressed_trajectory"]

@@ -175,13 +175,16 @@ class TestDescribe:
     def test_describe_single_category(self):
         cat = "spectral_analysis_fft"
         report = describe(cat)
-        # Should contain entries from the requested category
+        # Should contain all qualified names from the requested category
         for entry in get_category(cat):
-            assert entry.function in report
-        # Should NOT contain entries from an unrelated category
+            assert entry.qualified_name in report, (
+                f"Expected {entry.qualified_name!r} in single-category describe() output"
+            )
+        # Should NOT contain qualified names from an unrelated category
         for entry in get_category("dimensionality_reduction"):
-            # The function name might coincidentally appear; check qualified name
-            assert entry.class_name not in report or entry.function in report
+            assert entry.qualified_name not in report, (
+                f"Unexpected {entry.qualified_name!r} in single-category describe() output"
+            )
 
     def test_describe_unknown_category_raises(self):
         with pytest.raises(KeyError):

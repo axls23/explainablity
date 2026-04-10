@@ -525,7 +525,7 @@ def describe(category: Optional[str] = None) -> str:
         "=" * 72,
     ]
 
-    categories = {category: MATH_TOOLS_MAP[category]} if category else MATH_TOOLS_MAP
+    categories = {category: get_category(category)} if category else MATH_TOOLS_MAP
 
     for cat_key, entries in categories.items():
         category_title = cat_key.replace("_", " ").title()

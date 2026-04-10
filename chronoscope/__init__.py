@@ -14,3 +14,11 @@ from .observer import SignalObserver
 from .analyzer import CausalAnalyzer
 from .synthesizer import ReportSynthesizer
 from .dashboard_bridge import DashboardBridge
+from .math_tools_map import (
+    MATH_TOOLS_MAP,
+    FunctionEntry,
+    list_categories,
+    get_mapping,
+    get_category,
+    describe,
+)
